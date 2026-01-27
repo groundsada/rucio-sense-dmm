@@ -87,7 +87,9 @@ def config_get_int(section, option, default=None, constraint=None) -> int:
         value = config_get(section, option, extract_function=ConfigParser.ConfigParser.getint)
         if constraint:
             if constraint == "pos" and value <= 0:
-                raise ValueError(f"Value {value} for option '{option}' in section '{section}' does not satisfy constraint '{constraint}'")
+                raise ValueError(f"Value {value} for option '{option}' in section '{section}' does not satisfy constraint 'positive'")
+            elif constraint == "nonneg" and value < 0:
+                raise ValueError(f"Value {value} for option '{option}' in section '{section}' does not satisfy constraint 'non-negative'")
         return value
     except ConfigParser.NoSectionError:
         if default is not None:
