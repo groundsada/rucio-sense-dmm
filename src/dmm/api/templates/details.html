@@ -21,7 +21,7 @@
 
             <div class="details-row">
                 <span class="details-label">Bandwidth:</span>
-                <span class="details-value">{{ data.bandwidth }}</span>
+                <span class="details-value">{{ data.allocated_bandwidth_mbps }}</span>
             </div>
             <div class="details-row">
                 <span class="details-label">Transfer Status:</span>
@@ -41,7 +41,7 @@
             </div>
             <div class="details-row">
                 <span class="details-label">Current FTS Limits:</span>
-                <span class="details-value">{{ data.fts_limit_current }}</span>
+                <span class="details-value">{{ data.fts_streams_current }}</span>
             </div>
             <div class="details-row">
                 <button type="button" onclick="markAsFinished('{{ data.rule_id }}')">Mark as Finished</button>

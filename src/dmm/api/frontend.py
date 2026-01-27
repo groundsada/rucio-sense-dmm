@@ -2,6 +2,7 @@ import logging
 import os
 import asyncio
 import re
+from datetime import datetime
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -35,7 +36,7 @@ async def handle_client(rule_id: str, session=None):
     
     while retry_count < max_retries:
         try:
-            req = DBRequest.from_id(rule_id, session=session)
+            req = DBRequest.get_by_id(rule_id, session=session, use_lock=False)
             if req:
                 if req.src_endpoint and req.dst_endpoint:
                     result = {"source": req.src_endpoint.hostname, "destination": req.dst_endpoint.hostname}
@@ -52,7 +53,7 @@ async def handle_client(rule_id: str, session=None):
         except HTTPException:
             raise
         except Exception as e:
-            logging.error(f"Error processing client request: {str(e)}")
+            logging.error(f"Error processing client request: {str(e)}", exc_info=True)
             raise HTTPException(status_code=500, detail="Internal server error")
     
     raise HTTPException(status_code=404, detail="Request not yet allocated")
@@ -81,7 +82,7 @@ async def get_sites(request: Request, session=None):
 @databased
 async def open_rule_details(request: Request, rule_id: str, session=None):
     try:
-        req = DBRequest.from_id(rule_id, session=session)
+        req = DBRequest.get_by_id(rule_id, session=session, use_lock=False)
         return templates.TemplateResponse("details.html", {"request": request, "data": req})
     except Exception as e:
         logging.error(e)
@@ -93,10 +94,11 @@ async def mark_finished(request: Request, session=None):
     try:
         data = await request.json()
         rule_id = data.get("rule_id")
-        req = DBRequest.from_id(rule_id, session=session)
+        req = DBRequest.get_by_id(rule_id, session=session)
         if req.transfer_status == "NOT_SENSE":
             return "This is not a SENSE rule, what are you trying to do?"
-        req.update_transfer_status("FINISHED", session=session)
+        req.set_status("FINISHED", session=session)
+        req.update({"rucio_finished_at": datetime.now()}, session=session)
         return "Request marked as finished"
     except Exception as e:
         logging.error(e)
@@ -109,11 +111,11 @@ async def update_fts_limit(request: Request, session=None):
         data = await request.json()
         rule_id = data.get("rule_id")
         limit = data.get("limit")
-        req = DBRequest.from_id(rule_id, session=session)
+        req = DBRequest.get_by_id(rule_id, session=session)
         if req.transfer_status == "NOT_SENSE":
             return "This is not a SENSE rule, what are you trying to do?"
         if req.transfer_status not in ["CANCELLED", "FINISHED", "DELETED"]:
-            req.update_fts_limit_desired(limit=limit, session=session)
+            req.set_fts_streams(desired=limit, session=session)
             return "FTS limit updated"
         else:
             raise HTTPException(status_code=400, detail="Cannot update FTS limit for cancelled, finished or deleted requests")
@@ -127,10 +129,10 @@ async def reinitialize_sense(request: Request, session=None):
     try:
         data = await request.json()
         rule_id = data.get("rule_id")
-        req = DBRequest.from_id(rule_id, session=session)
+        req = DBRequest.get_by_id(rule_id, session=session)
         if req.transfer_status == "NOT_SENSE":
             return "This is not a SENSE rule, what are you trying to do?"
-        req.update_transfer_status("ALLOCATED", session=session)
+        req.set_status("ALLOCATED", session=session)
         return "Request reinitialized"
     except Exception as e:
         logging.error(e)
@@ -142,10 +144,10 @@ async def reinitialize_request(request: Request, session=None):
     try:
         data = await request.json()
         rule_id = data.get("rule_id")
-        req = DBRequest.from_id(rule_id, session=session)
+        req = DBRequest.get_by_id(rule_id, session=session)
         if req.transfer_status == "NOT_SENSE":
             return "This is not a SENSE rule, what are you trying to do?"
-        req.update_transfer_status("INIT", session=session)
+        req.set_status("INIT", session=session)
         return "Request reinitialized"
     except Exception as e:
         logging.error(e)
