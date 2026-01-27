@@ -1,10 +1,10 @@
-import sys
 import os
 import argparse
 import logging
+import threading
 
 import multiprocessing
-import uvicorn # web server for the frontend
+import uvicorn
 
 from rucio.client import Client
 from dmm.core.config import config_get_int
@@ -42,7 +42,9 @@ class DMM:
         self.sites_frequency = config_get_int("daemons", "db", default=7200, constraint="nonneg")
         self.fts_frequency = config_get_int("daemons", "fts", default=60)
 
-        self.lock = multiprocessing.Lock()
+        self.lock = threading.Lock()
+        self.running = True
+        self.threads = []
 
         try:
             self.rucio_client = Client()
@@ -60,7 +62,15 @@ class DMM:
 
     def start(self) -> None:
         logging.info("Starting Daemons")
+        
+        logging.info("Initializing site database - this must complete before other daemons start")
         sitedb = RefreshSiteDBDaemon(frequency=self.sites_frequency, kwargs={"client": self.rucio_client})
+        try:
+            sitedb.run_once(client=self.rucio_client, session=None)
+            logging.info("Site database initialization completed successfully")
+        except Exception as e:
+            logging.error(f"Failed to initialize site database: {e}", exc_info=True)
+            logging.warning("Continuing with daemon startup, but some daemons may fail without site data")
         
         allocator = AllocatorDaemon(frequency=self.dmm_frequency)
         decider = DeciderDaemon(frequency=self.dmm_frequency)
@@ -79,23 +89,33 @@ class DMM:
         canceller = SENSECancellerDaemon(frequency=self.sense_frequency)
         deleter = SENSEDeleterDaemon(frequency=self.sense_frequency)
 
-        sitedb.start(self.lock)
-        fts.start(self.lock)
-        allocator.start(self.lock)
-        decider.start(self.lock)
-        monit.start(self.lock)
-        rucio_init.start(self.lock)
-        rucio_modifier.start(self.lock)
-        rucio_finisher.start(self.lock)
-        sense_updater.start(self.lock)
-        stager.start(self.lock)
-        provision.start(self.lock)
-        sense_modifier.start(self.lock)
-        canceller.start(self.lock)
-        deleter.start(self.lock)
+        daemons = [
+            sitedb, fts, allocator, decider, monit,
+            rucio_init, rucio_modifier, rucio_finisher,
+            sense_updater, stager, provision, sense_modifier,
+            canceller, deleter
+        ]
 
-        frontend_process = multiprocessing.Process(target=self.run_server, args=(self.port,))
+        logging.info("Starting all daemon threads")
+        for daemon in daemons:
+            thread = daemon.start(self.lock)
+            if thread:
+                self.threads.append(thread)
+
+        frontend_process = multiprocessing.Process(target=self.run_server, args=(self.port,), name="Frontend")
         frontend_process.start()
+        
+        logging.info("All daemons and frontend started successfully")
+
+    def stop(self) -> None:
+        logging.info("Stopping DMM and all daemons")
+        self.running = False
+        
+        for thread in self.threads:
+            if thread.is_alive():
+                thread.join(timeout=10)
+        
+        logging.info("DMM stopped successfully")
 
 def main():
     argparser = argparse.ArgumentParser()
