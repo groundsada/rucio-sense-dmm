@@ -1,4 +1,4 @@
-from sqlmodel import Field, Relationship
+from sqlmodel import Field, Relationship, select
 from typing import List, Optional
 
 import logging
@@ -11,36 +11,58 @@ class Endpoint(ModelBase, table=True):
     ip_range: Optional[str] = Field(default=None, unique=True)
     protocol: Optional[str] = Field(default=None)
     hostname: Optional[str] = Field(default=None)
-    in_use: Optional[bool] = Field(default=None)
+    is_allocated: Optional[bool] = Field(default=False)  # Renamed from in_use for clarity
 
     site: Optional["Site"] = Relationship(back_populates='endpoints')
     
-    ep_request_src: List["Request"] = Relationship(back_populates='src_endpoint', sa_relationship_kwargs={"foreign_keys": "[Request.src_endpoint_]"})
-    ep_request_dst: List["Request"] = Relationship(back_populates='dst_endpoint', sa_relationship_kwargs={"foreign_keys": "[Request.dst_endpoint_]"})
+    requests_as_source: List["Request"] = Relationship(
+        back_populates='src_endpoint', 
+        sa_relationship_kwargs={"foreign_keys": "[Request.src_endpoint_]"}
+    )
+    requests_as_destination: List["Request"] = Relationship(
+        back_populates='dst_endpoint', 
+        sa_relationship_kwargs={"foreign_keys": "[Request.dst_endpoint_]"}
+    )
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
     @classmethod
-    def all(cls, session=None):
-        return [ep for ep in session.query(cls).all()]
+    def get_all(cls, session=None, use_lock: bool = True):
+        logging.debug(f"ENDPOINT QUERY: getting all endpoints, locked={use_lock}")
+        statement = select(cls)
+        if use_lock:
+            statement = statement.with_for_update()
+        return list(session.exec(statement).all())
     
     @classmethod
-    def from_iprange(cls, iprange, session=None):
-        logging.debug(f"ENDPOINT QUERY: ip range {iprange}")
-        return session.query(cls).filter(cls.ip_range == iprange).first()
+    def get_by_ip_range(cls, ip_range: str, session=None, use_lock: bool = True):
+        logging.debug(f"ENDPOINT QUERY: ip range {ip_range}, locked={use_lock}")
+        statement = select(cls).where(cls.ip_range == ip_range)
+        if use_lock:
+            statement = statement.with_for_update()
+        return session.exec(statement).first()
     
     @classmethod
-    def from_site(cls, site_name, session=None):
-        logging.debug(f"ENDPOINT QUERY: site name {site_name}")
-        return session.query(cls).filter(cls.site_name == site_name).all()
+    def get_by_site(cls, site_name: str, session=None, use_lock: bool = True):
+        logging.debug(f"ENDPOINT QUERY: site name {site_name}, locked={use_lock}")
+        statement = select(cls).where(cls.site_name == site_name)
+        if use_lock:
+            statement = statement.with_for_update()
+        return list(session.exec(statement).all())
     
     @classmethod
-    def for_rule(cls, site_name, ip_range, session=None):
-        logging.debug(f"ENDPOINT QUERY: site name {site_name} and ip range {ip_range}")
-        return session.query(cls).filter(cls.site_name == site_name, cls.ip_range == ip_range).first()
+    def get_for_allocation(cls, site_name: str, ip_range: str, session=None):
+        logging.debug(f"ENDPOINT QUERY: site={site_name}, ip_range={ip_range}")
+        statement = (
+            select(cls)
+            .where(cls.site_name == site_name)
+            .where(cls.ip_range == ip_range)
+            .with_for_update()
+        )
+        return session.exec(statement).first()
 
-    def mark_inuse(self, in_use, session=None):
-        logging.debug(f"Marking endpoint {self.ip_range} as {'inuse' if in_use else 'free'}")
-        self.in_use = in_use
+    def set_allocated(self, is_allocated: bool, session=None):
+        logging.debug(f"Setting endpoint {self.ip_range} allocation status to {is_allocated}")
+        self.is_allocated = is_allocated
         self.save(session)
