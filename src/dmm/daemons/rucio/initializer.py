@@ -22,43 +22,54 @@ class RucioInitDaemon(DaemonBase):
         """
         Process Rucio rules and create requests in the database.
         """
-        rules = client.list_replication_rules()
-        for rule in rules:
-            if self._is_rule_in_db(rule, session):
-                logging.debug(f"Rule {rule['id']} already exists in the database.")
-                continue
+        try:
+            rules = client.list_replication_rules()
+        except Exception as e:
+            logging.error(f"Failed to list Rucio rules: {e}", exc_info=True)
+            return
             
-            if rule.get("state") == "OK":
-                logging.debug(f"Rule {rule['id']} is already finished; skipping.")
-                continue
-            elif rule.get("state") == "STUCK":
-                logging.debug(f"Rule {rule['id']} is stuck; skipping.")
-                continue
-
-            logging.debug(f"Processing rule {rule['id']}.")
+        for rule in rules:
             try:
+                if self._is_rule_in_db(rule, session):
+                    logging.debug(f"Rule {rule['id']} already exists in the database.")
+                    continue
+                
+                rule_state = rule.get("state")
+                if rule_state == "OK":
+                    logging.debug(f"Rule {rule['id']} is already finished; skipping.")
+                    continue
+                elif rule_state == "STUCK":
+                    logging.debug(f"Rule {rule['id']} is stuck; skipping.")
+                    continue
+
+                logging.debug(f"Processing rule {rule['id']}.")
                 new_request = self._create_request_from_rule(rule, client, session)
                 new_request.save(session=session)
+                session.commit()
                 logging.info(f"Created new request for rule {rule['id']}.")
+                
             except Exception as e:
-                logging.error(f"Failed to create request for rule {rule['id']}: {e}")
+                logging.error(f"Failed to create request for rule {rule.get('id', 'UNKNOWN')}: {e}", exc_info=True)
+                session.rollback()
                 continue
 
     def _is_rule_in_db(self, rule, session) -> bool:
         """
         Check if the rule already exists in the database.
         """
-        return Request.from_id(rule["id"], session=session) is not None
+        return Request.get_by_id(rule["id"], session=session, use_lock=False) is not None
 
     def _get_rule_size(self, rule, client) -> int:
         """
         Get the total size of the files in the rule (in bytes).
         """
         try:
-            return sum([i.get("bytes") for i in client.list_files(scope=rule["scope"], name=rule["name"])])
+            files = list(client.list_files(scope=rule["scope"], name=rule["name"]))
+            total_bytes = sum([f.get("bytes", 0) for f in files if f.get("bytes") is not None])
+            return total_bytes if total_bytes > 0 else 0
         except Exception as e:
-            logging.error(f"Failed to get rule size for rule {rule['id']}: {e}")
-            return None
+            logging.error(f"Failed to get rule size for rule {rule['id']}: {e}", exc_info=True)
+            return 0  # Return 0 instead of None to avoid database issues
 
     def _create_request_from_rule(self, rule, client, session) -> Request:
         """
@@ -66,22 +77,28 @@ class RucioInitDaemon(DaemonBase):
         """
         src_site_name = rule.get("source_replica_expression")
         dst_site_name = rule.get("rse_expression")
-        src_site = Site.from_name(src_site_name, session=session)
-        dst_site = Site.from_name(dst_site_name, session=session)
         
-        if not src_site or not dst_site:
-            raise ValueError(f"Source or destination site not found for rule {rule['id']}.")
+        if not src_site_name or not dst_site_name:
+            raise ValueError(f"Rule {rule['id']} missing source or destination site expression")
+        
+        src_site = Site.get_by_name(src_site_name, session=session, use_lock=False)
+        dst_site = Site.get_by_name(dst_site_name, session=session, use_lock=False)
+        
+        if not src_site:
+            raise ValueError(f"Source site '{src_site_name}' not found in database for rule {rule['id']}")
+        if not dst_site:
+            raise ValueError(f"Destination site '{dst_site_name}' not found in database for rule {rule['id']}")
 
-        priority = rule.get("priority")
-        fts_limit_desired = config_get_int("fts", "default_num_streams", 20)
+        priority = rule.get("priority", 3)  # Default priority if not specified
+        fts_streams_desired = config_get_int("fts", "default_num_streams", default=20)
 
-        activity = rule.get("activity", None) # activity for SENSE rules contains SENSE
-        if not activity or "sense" not in activity.lower():
-            logging.debug(f"Rule {rule['id']} is not a SENSE rule; setting status to 'NOT_SENSE'.")
-            transfer_status = "NOT_SENSE"
-        else:
+        activity = rule.get("activity")  # activity for SENSE rules contains SENSE
+        if activity and "sense" in activity.lower():
             logging.debug(f"Rule {rule['id']} identified as a SENSE rule.")
             transfer_status = "INIT"
+        else:
+            logging.debug(f"Rule {rule['id']} is not a SENSE rule; setting status to 'NOT_SENSE'.")
+            transfer_status = "NOT_SENSE"
 
         rule_size = self._get_rule_size(rule, client)
 
@@ -92,5 +109,5 @@ class RucioInitDaemon(DaemonBase):
             priority=priority,
             rule_size=rule_size,
             transfer_status=transfer_status,
-            fts_limit_desired=fts_limit_desired,
+            fts_streams_desired=fts_streams_desired,
         )    

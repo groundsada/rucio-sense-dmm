@@ -39,15 +39,15 @@ class DeciderDaemon(DaemonBase):
         The max available bandwidth is gotten from the Mesh table.
         """
         multi_graph = nx.MultiGraph()
-        reqs = Request.from_status(status=["MODIFIED", "DECIDED", "STALE", "STAGED", "PROVISIONED", "FINISHED"], session=session) # get all requests which would affect the decision (i.e. don't consider requests that are in CANCELLED or FAILED state)
+        reqs = Request.get_by_status(statuses=["MODIFIED", "DECIDED", "STALE", "STAGED", "PROVISIONED", "FINISHED"], session=session) # get all requests which would affect the decision (i.e. don't consider requests that are in CANCELLED or FAILED state)
         if reqs == []:
             return multi_graph
         for req in reqs:
-            src_port_capacity = Mesh.max_bandwidth(req.src_site, session=session)
-            multi_graph.add_node(req.src_site.name, port_capacity=src_port_capacity)
-            dst_port_capacity = Mesh.max_bandwidth(req.dst_site, session=session)
-            multi_graph.add_node(req.dst_site.name, port_capacity=dst_port_capacity)
-            multi_graph.add_edge(req.src_site.name, req.dst_site.name, rule_id=req.rule_id, priority=req.priority, bandwidth=req.bandwidth, available_bandwidth=req.available_bandwidth)
+            src_link_capacity_mbps = Mesh.get_link_capacity(req.src_site, session=session)
+            multi_graph.add_node(req.src_site.name, link_capacity_mbps=src_link_capacity_mbps)
+            dst_link_capacity_mbps = Mesh.get_link_capacity(req.dst_site, session=session)
+            multi_graph.add_node(req.dst_site.name, link_capacity_mbps=dst_link_capacity_mbps)
+            multi_graph.add_edge(req.src_site.name, req.dst_site.name, rule_id=req.rule_id, priority=req.priority, bandwidth=req.allocated_bandwidth_mbps, available_bandwidth=req.available_bandwidth_mbps)
         return multi_graph
 
     def _simplify_graph(self, multi_graph) -> tuple:
@@ -81,7 +81,7 @@ class DeciderDaemon(DaemonBase):
             c[i] = -priority
         
         A = nx.incidence_matrix(simple_graph, nodelist=nodes, edgelist=edges).toarray()
-        b = np.array([simple_graph.nodes[node]['port_capacity'] for node in nodes])
+        b = np.array([simple_graph.nodes[node]['link_capacity_mbps'] for node in nodes])
 
         available_bandwidths = np.array([data['available_bandwidth'] for _, _, data in edges])
 
@@ -93,19 +93,31 @@ class DeciderDaemon(DaemonBase):
     def _optimize_bandwidth(self, A, b, c, edges) -> object:
         """
         Optimize the bandwidth allocation using linear programming.
+        Iteratively increases the lower bound to find the maximum feasible minimum bandwidth.
         """
         optim_result = None
         lower_bound = 0
-        while True:
-            # keep trying until the optimization fails (i.e. the lower bound is too high)
-            # we can show that the ideal case is when the lower bound is the maximum possible value
+        max_iterations = 1000  # Prevent infinite loops
+        iterations = 0
+        
+        while iterations < max_iterations:
+            # Keep trying until the optimization fails (i.e. the lower bound is too high)
+            # We can show that the ideal case is when the lower bound is the maximum possible value
             bounds = [(lower_bound, None) for _ in range(len(edges))]
             curr_optim_result = linprog(c, A_ub=A, b_ub=b, bounds=bounds, method='highs')
+            
             if not curr_optim_result.success:
                 break
             else:
                 optim_result = curr_optim_result
-                lower_bound += 5
+                lower_bound += 5  # Increment in Mbps
+            iterations += 1
+        
+        # Check if we hit max iterations without finding the limit
+        if iterations >= max_iterations and optim_result is not None:
+            logging.warning(f"Optimization reached max_iterations ({max_iterations}) with lower_bound={lower_bound - 5}. "
+                          "This may indicate an unbounded solution or need for higher max_iterations.")
+            
         if optim_result is None:
             raise ValueError("No feasible solution found for the optimization problem.")
         if not optim_result.success:
@@ -126,37 +138,56 @@ class DeciderDaemon(DaemonBase):
             if total_priority > 0:
                 proportion = data['priority'] / total_priority
                 bandwidth = bandwidths[edge_index[(u, v)]] * proportion
-                multi_graph[u][v][key]['bandwidth'] = floor(bandwidth // 1000) * 1000 # round to lowest 1000 because SENSE doesn't like it otherwise, probably should be a configurable value
+                # Round to lowest 1000 Mbps, but ensure minimum of 1000 if bandwidth > 0
+                rounded_bandwidth = floor(bandwidth // 1000) * 1000
+                if bandwidth > 0 and rounded_bandwidth == 0:
+                    rounded_bandwidth = 1000  # Minimum bandwidth
+                multi_graph[u][v][key]['bandwidth'] = rounded_bandwidth
             else:
+                logging.warning(f"Total priority is 0 for edge {u}->{v}, setting bandwidth to 0")
                 multi_graph[u][v][key]['bandwidth'] = 0
 
     def _allocate_new_bandwidth(self, multi_graph, session) -> None:
         """
         Allocate bandwidth for new requests and mark them as decided
         """
-        reqs_allocated = Request.from_status(status=["STAGED"], session=session)
+        reqs_allocated = Request.get_by_status(statuses=["STAGED"], session=session)
         for req in reqs_allocated:
+            allocated_bandwidth = None  # Initialize to prevent NameError
             for _, _, key, data in multi_graph.edges(keys=True, data=True):
                 if "rule_id" in data and data["rule_id"] == req.rule_id:
                     allocated_bandwidth = int(data["bandwidth"])
-            req.update_bandwidth(allocated_bandwidth, session=session)
+                    break  # Found the matching edge, no need to continue
+            
+            if allocated_bandwidth is None:
+                logging.error(f"Could not find bandwidth allocation for request {req.rule_id} in multi_graph")
+                continue  # Skip this request, don't update it
+                
+            req.set_allocated_bandwidth(allocated_bandwidth, session=session)
             logging.info(f"Allocated bandwidth for request {req.rule_id}: {allocated_bandwidth}")
-            req.update_transfer_status(status="DECIDED", session=session)
+            req.set_status(status="DECIDED", session=session)
 
     def _modify_existing_bandwidth(self, multi_graph, session) -> None:
         """
         Modify the bandwidth for existing requests and mark them as stale
         """
-        reqs_provisioned = Request.from_status(status=["MODIFIED", "PROVISIONED"], session=session)
+        reqs_provisioned = Request.get_by_status(statuses=["MODIFIED", "PROVISIONED"], session=session)
         for req in reqs_provisioned:
+            allocated_bandwidth = None  # Initialize to prevent NameError
             for _, _, key, data in multi_graph.edges(keys=True, data=True):
                 if "rule_id" in data and data["rule_id"] == req.rule_id:
                     allocated_bandwidth = int(data["bandwidth"])
-            if allocated_bandwidth != req.bandwidth:
-                req.update_previous_bandwidth(req.bandwidth, session=session)
-                req.update_bandwidth(allocated_bandwidth, session=session)
+                    break  # Found the matching edge, no need to continue
+            
+            if allocated_bandwidth is None:
+                logging.error(f"Could not find bandwidth allocation for request {req.rule_id} in multi_graph")
+                continue  # Skip this request, don't update it
+                
+            if allocated_bandwidth != req.allocated_bandwidth_mbps:
+                req.set_previous_bandwidth(req.allocated_bandwidth_mbps, session=session)
+                req.set_allocated_bandwidth(allocated_bandwidth, session=session)
                 logging.info(f"Modified bandwidth for request {req.rule_id}: {allocated_bandwidth}")
-                req.update_transfer_status(status="STALE", session=session)
+                req.set_status(status="STALE", session=session)
 
     @staticmethod
     def _good_response(response):

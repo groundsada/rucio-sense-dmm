@@ -22,26 +22,44 @@ class SENSEStagerDaemon(DaemonBase):
         self.run_once(**kwargs)
 
     @databased
-    def process(self, session=None):
-        reqs_allocated = Request.from_status(status=["ALLOCATED"], session=session)
+    def run_once(self, session=None):
+        reqs_allocated = Request.get_by_status(statuses=["ALLOCATED"], session=session)
         if reqs_allocated == []:
             return
         for req in reqs_allocated:
+            sense_uuid = None
             try:
                 vlan_range = Mesh.get_vlan_range(site_1=req.src_site, site_2=req.dst_site, session=session)
                 if vlan_range is None:
-                    logging.error(f"No VLAN range found for {req.rule_id}, skipping staging")
+                    logging.error(f"No VLAN range found for {req.rule_id}, marking as FAILED")
+                    req.set_status(status="FAILED", session=session)
                     continue
+                    
                 response = self._stage_request(req, vlan_range, session=session)
+                if not response:
+                    logging.error(f"Staging returned empty response for {req.rule_id}")
+                    continue
+                    
                 logging.debug(f"Staging returned response {response}")
-                sense_uuid = response["service_uuid"]
-                req.update_sense_uuid(sense_uuid, session=session)
-                available_bandwidth = int(response.get("queries")[1].get("results")[0].get("bandwidth")) / 1000 ** 2
-                # available_bandwidth = 100000
-                req.update_source_affiliation_uri(response.get("queries")[2].get("results")[0].get("ipv6_subnet_uri"), session=session)
-                req.update_destination_affiliation_uri(response.get("queries")[2].get("results")[1].get("ipv6_subnet_uri"), session=session)
-                req.update_available_bandwidth(available_bandwidth, session=session)
-                req.update_transfer_status(status="STAGED", session=session)
+                sense_uuid = response.get("service_uuid")
+                
+                if not sense_uuid:
+                    raise ValueError("No service_uuid in response")
+                
+                req.set_sense_uuid(sense_uuid, session=session)
+                
+                # Extract available bandwidth from SENSE response
+                # SENSE returns bandwidth in Mbps, store it as-is
+                # The system uses Mbps throughout (decider rounds to 1000 Mbps increments)
+                bandwidth_mbps = int(response.get("queries", [{}])[1].get("results", [{}])[0].get("bandwidth", 0))
+                available_bandwidth_mbps = bandwidth_mbps  # Store in Mbps for consistency
+                
+                src_uri = response.get("queries")[2].get("results")[0].get("ipv6_subnet_uri")
+                dst_uri = response.get("queries")[2].get("results")[1].get("ipv6_subnet_uri")
+                req.set_sense_uris(src_uri, dst_uri, session=session)
+                req.set_available_bandwidth(available_bandwidth_mbps, session=session)
+                req.set_status(status="STAGED", session=session)
+                
             except Exception as e:
                 logging.error(f"Failed to stage link for {req.rule_id}, {e}, will try again")
     
@@ -56,9 +74,9 @@ class SENSEStagerDaemon(DaemonBase):
                     {
                         "ask": "edit",
                         "options": [
-                            {"data.connections[0].terminals[0].uri": Site.from_name(name=req.src_site.name, session=session).sense_uri},
+                            {"data.connections[0].terminals[0].uri": Site.get_by_name(name=req.src_site.name, session=session, use_lock=False).sense_uri},
                             {"data.connections[0].terminals[0].ipv6_prefix_list": req.src_endpoint.ip_range},
-                            {"data.connections[0].terminals[1].uri": Site.from_name(name=req.dst_site.name, session=session).sense_uri},
+                            {"data.connections[0].terminals[1].uri": Site.get_by_name(name=req.dst_site.name, session=session, use_lock=False).sense_uri},
                             {"data.connections[0].terminals[1].ipv6_prefix_list": req.dst_endpoint.ip_range},
                             {"data.connections[0].terminals[0].vlan_tag": vlan_range},
                             {"data.connections[0].terminals[1].vlan_tag": vlan_range}

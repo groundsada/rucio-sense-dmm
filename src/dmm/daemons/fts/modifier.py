@@ -30,25 +30,25 @@ class FTSModifierDaemon(DaemonBase):
         self._process_requests(session, ["DELETED"], self._delete_request)
 
     def _process_requests(self, session, statuses, action):
-        reqs = Request.from_status(status=statuses, session=session)
+        reqs = Request.get_by_status(statuses=statuses, session=session)
         if reqs:
             for req in reqs:
                 action(req, session)
 
     def _modify_request(self, req, session):
-        if req.fts_limit_current != req.fts_limit_desired:
-            logging.debug(f"Modifying FTS limits for request {req.rule_id}, from {req.fts_limit_current} to {req.fts_limit_desired}")
-            link_modified = self._modify_link_config(req, max_active=req.fts_limit_desired, min_active=req.fts_limit_desired)
-            se_modified = self._modify_se_config(req, max_inbound=req.fts_limit_desired, max_outbound=req.fts_limit_desired)
+        if req.fts_streams_current != req.fts_streams_desired:
+            logging.debug(f"Modifying FTS limits for request {req.rule_id}, from {req.fts_streams_current} to {req.fts_streams_desired}")
+            link_modified = self._modify_link_config(req, max_active=req.fts_streams_desired, min_active=req.fts_streams_desired)
+            se_modified = self._modify_se_config(req, max_inbound=req.fts_streams_desired, max_outbound=req.fts_streams_desired)
             if link_modified and se_modified:
-                req.update_fts_limit_current(limit=req.fts_limit_desired, session=session)
+                req.set_fts_streams(current=req.fts_streams_desired, session=session)
 
     def _delete_request(self, req, session):
-        if req.fts_limit_current != 0:
+        if req.fts_streams_current != 0:
             logging.debug(f"Deleting FTS limits for request {req.rule_id}")
             self._delete_link_config(req)
             self._delete_se_config(req)
-            req.update_fts_limit_current(limit=0, session=session)
+            req.set_fts_streams(current=0, session=session)
 
     def _modify_link_config(self, req, max_active, min_active):
         data = self._prepare_link_data(req, max_active, min_active)
@@ -63,28 +63,39 @@ class FTSModifierDaemon(DaemonBase):
         try:
             response_link = requests.delete(
                 self.fts_host + "/config/links/" + urllib.parse.quote("-".join([src_url_no_port, dst_url_no_port]), safe=""),
-                headers=self.headers, cert=self.cert, verify=False
+                headers=self.headers, cert=self.cert, verify=self.capath
             )
-            return response_link.status_code in [200, 201, 204]
-        except:
-            logging.exception("Error while deleting FTS link configs")
-            return None
+            success = response_link.status_code in [200, 201, 204]
+            if not success:
+                logging.warning(f"FTS link deletion returned status {response_link.status_code}: {response_link.text}")
+            return success
+        except Exception as e:
+            logging.error(f"Error while deleting FTS link configs: {e}", exc_info=True)
+            return False
         
     def _delete_se_config(self, req):
         src_url_no_port, dst_url_no_port = self._get_endpoints(req)
         try:
             response_src = requests.delete(
                 self.fts_host + "/config/se/" + urllib.parse.quote(src_url_no_port, safe=""),
-                headers=self.headers, cert=self.cert, verify=False
+                headers=self.headers, cert=self.cert, verify=self.capath
             )
             response_dst = requests.delete(
                 self.fts_host + "/config/se/" + urllib.parse.quote(dst_url_no_port, safe=""),
-                headers=self.headers, cert=self.cert, verify=False
+                headers=self.headers, cert=self.cert, verify=self.capath
             )
-            return (response_src.status_code in [200, 201, 204]) and (response_dst.status_code in [200, 201, 204])
-        except:
-            logging.exception("Error while deleting FTS SE configs")
-            return None
+            success_src = response_src.status_code in [200, 201, 204]
+            success_dst = response_dst.status_code in [200, 201, 204]
+            
+            if not success_src:
+                logging.warning(f"FTS SE deletion (src) returned status {response_src.status_code}: {response_src.text}")
+            if not success_dst:
+                logging.warning(f"FTS SE deletion (dst) returned status {response_dst.status_code}: {response_dst.text}")
+                
+            return success_src and success_dst
+        except Exception as e:
+            logging.error(f"Error while deleting FTS SE configs: {e}", exc_info=True)
+            return False
 
     def _prepare_link_data(self, req, max_active, min_active):
         src_url_no_port, dst_url_no_port = self._get_endpoints(req)
@@ -138,11 +149,15 @@ class FTSModifierDaemon(DaemonBase):
             response = requests.post(
                 self.fts_host + endpoint, headers=self.headers, cert=self.cert, verify=self.capath, data=data
             )
-            logging.info(f"FTS config modified, response: {response.text}")
-            return response.status_code in [200, 201]
-        except:
-            logging.exception("Error while modifying FTS config")
-            return None
+            success = response.status_code in [200, 201]
+            if success:
+                logging.info(f"FTS config modified successfully for {endpoint}")
+            else:
+                logging.warning(f"FTS config modification returned status {response.status_code}: {response.text}")
+            return success
+        except Exception as e:
+            logging.error(f"Error while modifying FTS config for {endpoint}: {e}", exc_info=True)
+            return False
 
     def _get_endpoints(self, req):
         src_url_no_port = req.src_endpoint.protocol + "://" + req.src_endpoint.hostname.split(":")[0]

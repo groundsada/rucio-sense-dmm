@@ -21,7 +21,7 @@ class SENSEHandlerDaemon(DaemonBase):
 
     @databased
     def run_once(self, session=None):
-        reqs = Request.from_status(status=["STAGED", "PROVISIONED", "CANCELED", "STALE", "DECIDED", "FINISHED"], session=session)
+        reqs = Request.get_by_status(statuses=["STAGED", "PROVISIONED", "CANCELED", "STALE", "DECIDED", "FINISHED"], session=session)
         if not reqs:
             return
         
@@ -32,20 +32,21 @@ class SENSEHandlerDaemon(DaemonBase):
             workflow_api = WorkflowCombinedApi()
 
             status = workflow_api.instance_get_status(si_uuid=req.sense_uuid) or "UNKNOWN"
-            req.update_sense_circuit_status(status=status, session=session)
+            req.set_sense_circuit_status(status=status, session=session)
 
-            if not req.sense_affiliated and re.match(r"(CREATE) - (COMPILED|COMMITTED|COMMITTING|READY)$", status):
+            # Affiliate endpoints when ready
+            if not req.sense_affiliated and status and re.match(r"(CREATE) - (COMPILED|COMMITTED|COMMITTING|READY)$", status):
                 logging.debug(f"Request {req.rule_id} is not affiliated with SENSE instance {req.sense_uuid}, affiliating now.")
-                self._affiliate_endpoints(req, workflow_api)
+                self._affiliate_endpoints(req)
                 req.update({"sense_affiliated": True}, session=session)
 
-            # update sense_provisioned_at if the status is COMPILED for monit
-            if not req.sense_provisioned_at and re.match(r"(CREATE) - READY$", status):
+            # Update sense_provisioned_at if the status is READY for monitoring
+            if not req.sense_provisioned_at and status and re.match(r"(CREATE) - READY$", status):
                 logging.debug(f"Request {req.rule_id} is ready, updating sense_provisioned_at to current time.")
-                req.update({"sense_provisioned_at": datetime.now()})
+                req.update({"sense_provisioned_at": datetime.now()}, session=session)
             
-                fts_limit = config_get_int("fts-streams", f"{req.src_site.name}-{req.dst_site.name}", 200)
-                req.update_fts_limit_desired(limit=fts_limit, session=session)
+                fts_limit = config_get_int("fts-streams", f"{req.src_site.name}-{req.dst_site.name}", default=200)
+                req.set_fts_streams(desired=fts_limit, session=session)
 
             # TODO: if sense creation fails, should retry
             # at staging step, i.e. before create - committed: 
@@ -54,19 +55,25 @@ class SENSEHandlerDaemon(DaemonBase):
                 # should put in allocated state, so vlan allocation can be retried
             # at finished step, i.e. after cancel - committed: should force retry
 
-    def _affiliate_endpoints(self, req, workflow_api):
-        # Affiliate endpoints with this instance
+    def _affiliate_endpoints(self, req):
+        """Affiliate endpoints with SENSE instance"""
         address_api = AddressApi()
 
-        src_pool_name = f'RUCIO_Site_BGP_Subnet_Pool-{req.src_site.name}'
-        exploded_source_ip = self.format_ipv6(ipaddress.IPv6Network(req.src_endpoint.ip_range))
-        logging.debug(f"Affiliating source endpoint {exploded_source_ip} with SENSE instance {req.sense_uuid} in address pool {src_pool_name}")
-        address_api.affiliate_address(pool=src_pool_name, uri=req.source_affiliation_uri, address=exploded_source_ip)
+        try:
+            src_pool_name = f'RUCIO_Site_BGP_Subnet_Pool-{req.src_site.name}'
+            exploded_source_ip = self.format_ipv6(ipaddress.IPv6Network(req.src_endpoint.ip_range))
+            logging.debug(f"Affiliating source endpoint {exploded_source_ip} with SENSE instance {req.sense_uuid} in address pool {src_pool_name}")
+            address_api.affiliate_address(pool=src_pool_name, uri=req.sense_src_uri, address=exploded_source_ip)
 
-        dst_pool_name = f'RUCIO_Site_BGP_Subnet_Pool-{req.dst_site.name}'
-        exploded_dest_ip = self.format_ipv6(ipaddress.IPv6Network(req.dst_endpoint.ip_range))
-        logging.debug(f"Affiliating destination endpoint {exploded_dest_ip} with SENSE instance {req.sense_uuid} in address pool {dst_pool_name}")
-        address_api.affiliate_address(pool=dst_pool_name, uri=req.destination_affiliation_uri, address=exploded_dest_ip)
+            dst_pool_name = f'RUCIO_Site_BGP_Subnet_Pool-{req.dst_site.name}'
+            exploded_dest_ip = self.format_ipv6(ipaddress.IPv6Network(req.dst_endpoint.ip_range))
+            logging.debug(f"Affiliating destination endpoint {exploded_dest_ip} with SENSE instance {req.sense_uuid} in address pool {dst_pool_name}")
+            address_api.affiliate_address(pool=dst_pool_name, uri=req.sense_dst_uri, address=exploded_dest_ip)
+            
+            logging.info(f"Successfully affiliated endpoints for request {req.rule_id}")
+        except Exception as e:
+            logging.error(f"Failed to affiliate endpoints for request {req.rule_id}: {e}", exc_info=True)
+            raise
     
     @staticmethod
     def _good_response(response):

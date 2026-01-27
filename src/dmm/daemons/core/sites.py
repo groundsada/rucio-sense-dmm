@@ -40,7 +40,7 @@ class RefreshSiteDBDaemon(DaemonBase):
         """
         Depending on whether the daemon has run before, the site might exist in the db already, if it exists then skip the SENSE queries for the uris.
         """
-        site_exists = Site.from_name(name=site, session=session)
+        site_exists = Site.get_by_name(name=site, session=session, use_lock=False)
         if site_exists:
             logging.debug(f"Site {site} already exists in database")
             return site_exists
@@ -61,7 +61,7 @@ class RefreshSiteDBDaemon(DaemonBase):
                     continue
                 vlan_range = self._get_vlan_range(site_obj, site_) # vlan ranges for site pairs can be different and need to be configured
                 link_capacity = self._get_link_capacity(site_info, vlan_range) # get the link capacity from SENSE
-                mesh = Mesh(site1=site_obj, site2=site_, vlan_range=vlan_range, link_capacity=link_capacity)
+                mesh = Mesh(site1=site_obj, site2=site_, vlan_range=vlan_range, link_capacity_mbps=link_capacity)
                 mesh.save(session=session)
 
             logging.debug(f"Site {site} added to database")
@@ -88,13 +88,18 @@ class RefreshSiteDBDaemon(DaemonBase):
             vlan_range_start, vlan_range_end = min(map(int, vlan_range.split(","))), max(map(int, vlan_range.split(",")))
             logging.debug(f"Using vlan range {vlan_range_start}-{vlan_range_end} for link capacity")
         if vlan_range == "any":
-            return int(site_info["peer_points"][0]["port_capacity"])
+            port_capacity = int(site_info["peer_points"][0]["port_capacity"])
+            logging.debug(f"Using port capacity {port_capacity} for vlan range 'any'")
+            return port_capacity
         else:
             for peer_point in site_info["peer_points"]:
                 if str(vlan_range_start) in peer_point["peer_vlan_pool"] and str(vlan_range_end) in peer_point["peer_vlan_pool"]:
-                    return int(peer_point["port_capacity"]) # return the port capacity for the vlan range chosen, if not found, return the first one
-            return int(site_info["peer_points"][0]["port_capacity"])
-        # return 100000.
+                    port_capacity =  int(peer_point["port_capacity"]) # return the port capacity for the vlan range chosen, if not found, return the first one
+                    logging.debug(f"Using port capacity {port_capacity} for vlan range {vlan_range_start}-{vlan_range_end}")
+                    return port_capacity
+            port_capacity = int(site_info["peer_points"][0]["port_capacity"])
+            logging.debug(f"Using default port capacity {port_capacity} for vlan range {vlan_range}")
+            return port_capacity
 
     def _get_site_uris(self, site) -> tuple:
         """
@@ -136,44 +141,85 @@ class RefreshSiteDBDaemon(DaemonBase):
         """
         Get the endpoints for a given site
         """
+        response = None
         try:
+            if not site_.sense_uri:
+                logging.warning(f"Site {site_.name} has no SENSE URI, skipping endpoint creation")
+                return
+                
             logging.info(f"Getting list of endpoints for {site_.sense_uri}")
             workflow_api = WorkflowCombinedApi()
+            
+            # Determine the correct metadata tag based on site name
+            # TODO: Make this configurable instead of hardcoded
+            metadata_tag = "/xrootd6" if "FNAL" in site_.name else "/xrootd"
+            
             manifest_json = {
                 "Metadata": "?metadata?",
-                "sparql-ext": f"SELECT ?metadata WHERE {{ ?site nml:hasService ?md_svc. ?md_svc mrs:hasNetworkAttribute ?dir_xrootd. ?dir_xrootd mrs:type 'metadata:directory'. ?dir_xrootd mrs:tag '/xrootd'. ?dir_xrootd mrs:value ?metadata.  FILTER regex(str(?site), '{site_.sense_uri}') }} LIMIT 1",
+                "sparql-ext": f"SELECT ?metadata WHERE {{ ?site nml:hasService ?md_svc. ?md_svc mrs:hasNetworkAttribute ?dir_xrootd. ?dir_xrootd mrs:type 'metadata:directory'. ?dir_xrootd mrs:tag '{metadata_tag}'. ?dir_xrootd mrs:value ?metadata.  FILTER regex(str(?site), '{site_.sense_uri}') }} LIMIT 1",
                 "required": "true"
-            } # manifest json to query SENSE for the endpoints for a given uri
-
-            ## HACK for FNAL testing
-            if "FNAL" in site_.name:
-                manifest_json["sparql-ext"] = f"SELECT ?metadata WHERE {{ ?site nml:hasService ?md_svc. ?md_svc mrs:hasNetworkAttribute ?dir_xrootd. ?dir_xrootd mrs:type 'metadata:directory'. ?dir_xrootd mrs:tag '/xrootd6'. ?dir_xrootd mrs:value ?metadata.  FILTER regex(str(?site), '{site_.sense_uri}') }} LIMIT 1"
+            }
             
             response = workflow_api.manifest_create(json.dumps(manifest_json))
+            if not response or "jsonTemplate" not in response:
+                raise ValueError(f"Invalid response from SENSE manifest creation: {response}")
+                
             metadata = json.loads(response["jsonTemplate"])
-            logging.debug(f"Got list of endpoints: {metadata} for {site_.sense_uri}")
+            logging.debug(f"Got metadata response for {site_.sense_uri}")
+            
+            if "Metadata" not in metadata:
+                logging.warning(f"No Metadata field in response for {site_.sense_uri}, skipping endpoint creation")
+                return
+                
             endpoint_list = json.loads(metadata["Metadata"].replace("'", "\""))
+            if not endpoint_list:
+                logging.warning(f"Empty endpoint list for {site_.sense_uri}")
+                return
 
             logging.info(f"Getting protocol for the registered endpoints for {site_.name}")
             rse = client.get_rse(site_.name)
             if not rse:
                 raise ValueError(f"RSE {site_.name} not found in Rucio")
             
-            protocol = rse.get('protocols', [{}])[0].get('scheme', None)
+            protocols = rse.get('protocols', [])
+            if not protocols:
+                raise ValueError(f"No protocols found for RSE {site_.name}")
+                
+            protocol = protocols[0].get('scheme')
             if not protocol:
-                raise ValueError(f"No protocol found for RSE {site_.name}")
+                raise ValueError(f"No scheme found in protocol for RSE {site_.name}")
 
+            # Add endpoints to database
+            endpoints_added = 0
             for iprange, hostname in endpoint_list.items():
-                iprange = ipaddress.IPv6Network(iprange).compressed
-                if Endpoint.from_iprange(iprange=iprange, session=session) is None:
-                    new_endpoint = Endpoint(site=site_,
-                                            protocol=protocol,
-                                            ip_range=iprange,
-                                            hostname=hostname,
-                                            in_use=False)
-                    new_endpoint.save(session=session)
+                try:
+                    iprange_compressed = ipaddress.IPv6Network(iprange).compressed
+                    
+                    # Check if endpoint already exists (no lock needed for existence check)
+                    if Endpoint.get_by_ip_range(ip_range=iprange_compressed, session=session, use_lock=False) is None:
+                        new_endpoint = Endpoint(
+                            site=site_,
+                            protocol=protocol,
+                            ip_range=iprange_compressed,
+                            hostname=hostname,
+                            is_allocated=False
+                        )
+                        new_endpoint.save(session=session)
+                        endpoints_added += 1
+                    else:
+                        logging.debug(f"Endpoint {iprange_compressed} already exists, skipping")
+                except Exception as endpoint_err:
+                    logging.error(f"Failed to add endpoint {iprange} for site {site_.name}: {endpoint_err}")
+                    continue
+                    
+            logging.info(f"Added {endpoints_added} new endpoints for {site_.name}")
+            
         except Exception as e:
-            raise ValueError(f"Getting list of endpoints failed for {site_.sense_uri}, {e}, SENSE response: {response}")
+            error_msg = f"Getting list of endpoints failed for {site_.sense_uri}: {e}"
+            if response:
+                error_msg += f", SENSE response: {response}"
+            logging.error(error_msg, exc_info=True)
+            raise ValueError(error_msg)
 
     @staticmethod
     def _good_response(response):

@@ -22,31 +22,51 @@ class MonitDaemon(DaemonBase):
 
     @databased
     def run_once(self, session=None):
-        reqs = Request.from_status(["PROVISIONED"], session=session)
+        reqs = Request.get_by_status(statuses=["PROVISIONED"], session=session)
         current_timestamp = round(datetime.timestamp(datetime.now()))
 
         for req in reqs:
-            if req.sense_provisioned_at is None:
+            try:
+                if req.sense_provisioned_at is None:
+                    logging.debug(f"Request {req.rule_id} has no provisioned_at timestamp, skipping")
+                    continue
+
+                if not req.src_endpoint or not req.src_endpoint.ip_range:
+                    logging.warning(f"Request {req.rule_id} has no source endpoint, skipping monitoring")
+                    continue
+
+                bytes_now = self.get_all_bytes_at_t(current_timestamp, req.src_endpoint.ip_range)
+
+                if req.prometheus_bytes is None:
+                    req.set_prometheus_metrics(bytes_transferred=bytes_now, session=session)
+                    continue
+
+                throughput = self.calculate_throughput(bytes_now, req.prometheus_bytes)
+                req.set_prometheus_metrics(throughput=throughput, bytes_transferred=bytes_now, session=session)
+
+                health_status = self.determine_health_status(throughput, req.allocated_bandwidth_mbps)
+                req.set_health(health_status, session=session)
+                
+            except Exception as e:
+                logging.error(f"Error monitoring request {req.rule_id}: {e}", exc_info=True)
                 continue
-
-            bytes_now = self.get_all_bytes_at_t(current_timestamp, req.src_endpoint.ip_range)
-
-            if req.prometheus_bytes is None:
-                req.update_prometheus_bytes(bytes_now, session=session)
-                continue
-
-            throughput = self.calculate_throughput(bytes_now, req.prometheus_bytes)
-            req.update_prometheus_throughput(throughput, session=session)
-            req.update_prometheus_bytes(bytes_now, session=session)
-
-            health_status = self.determine_health_status(throughput, req.bandwidth)
-            req.update_health(health_status, session=session)
 
     def calculate_throughput(self, bytes_now, prometheus_bytes):
-        return round((bytes_now - prometheus_bytes) / self.frequency / 1024 / 1024 / 1024 * 8, 2)
+        if self.frequency <= 0:
+            logging.error("Monitoring frequency is 0 or negative, cannot calculate throughput")
+            return 0.0
+        # Calculate throughput in Gbps
+        byte_diff = bytes_now - prometheus_bytes
+        if byte_diff < 0:
+            logging.warning(f"Negative byte difference detected: {byte_diff}, resetting to 0")
+            byte_diff = 0
+        return round(byte_diff / self.frequency / 1024 / 1024 / 1024 * 8, 2)
 
     def determine_health_status(self, throughput, bandwidth):
-        return "0" if throughput < 0.8 * bandwidth else "1"
+        if bandwidth is None or bandwidth <= 0:
+            return "0"  # Unknown/unhealthy if no bandwidth allocated
+        # Throughput should be at least 80% of allocated bandwidth
+        return "1" if throughput >= 0.8 * bandwidth else "0"
 
     def submit_query(self, query_dict) -> dict:
         endpoint = "api/v1/query"
@@ -77,17 +97,26 @@ class MonitDaemon(DaemonBase):
         return interfaces
 
     def get_all_bytes_at_t(self, time, ipv6) -> float:
-        transfers = self.get_interfaces(ipv6) 
+        transfers = self.get_interfaces(ipv6)
+        if not transfers:
+            logging.warning(f"No interfaces found for IPv6 {ipv6}")
+            return 0.0
+            
         total_bytes = 0
         for transfer in transfers:
-            device, instance, job, sitename = transfer[0], transfer[1], transfer[2], transfer[3]
-            query_params = f"device=\"{device}\",instance=\"{instance}\",job=\"{job}\",sitename=\"{sitename}\""
-            metric = f"node_network_transmit_bytes_total{{{query_params}}}"
+            try:
+                device, instance, job, sitename = transfer[0], transfer[1], transfer[2], transfer[3]
+                query_params = f"device=\"{device}\",instance=\"{instance}\",job=\"{job}\",sitename=\"{sitename}\""
+                metric = f"node_network_transmit_bytes_total{{{query_params}}}"
 
-            response = self.submit_query({"query": metric, "time": time})
-            if response["status"] == "success":
-                bytes_at_t = self.get_val_from_response(response)
-            else:
-                raise Exception(f"query {metric} failed")
-            total_bytes += float(bytes_at_t)
+                response = self.submit_query({"query": metric, "time": time})
+                if response.get("status") == "success" and response.get("data", {}).get("result"):
+                    bytes_at_t = self.get_val_from_response(response)
+                    total_bytes += float(bytes_at_t)
+                else:
+                    logging.warning(f"Query {metric} returned no data")
+            except Exception as e:
+                logging.error(f"Error querying bytes for interface {device}: {e}", exc_info=True)
+                continue
+                
         return total_bytes
