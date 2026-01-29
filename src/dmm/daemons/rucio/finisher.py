@@ -40,3 +40,5 @@ class RucioFinisherDaemon(DaemonBase):
         elif status == "STUCK":
             logging.debug(f"Request {req.rule_id} is stuck, marking as FINISHED in DMM so circuit can be taken down")
             req.set_status(status="FINISHED", session=session)
+            req.update({"rucio_finished_at": datetime.now()}, session=session)
+            req.set_fts_streams(current=0, session=session)  # Remove FTS
