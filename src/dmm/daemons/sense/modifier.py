@@ -1,17 +1,13 @@
 import logging
-import re
-import json
 
 from dmm.daemons.base import DaemonBase
 
 from dmm.db.session import databased
 from dmm.models.request import Request
-from dmm.models.site import Site
 from dmm.models.mesh import Mesh
 
 from dmm.core.config import config_get
-
-from sense.client.workflow_combined_api import WorkflowCombinedApi
+from dmm.core.sense import modify_link, is_ready_for_modify, is_being_modified
 
 class SENSEModifierDaemon(DaemonBase):
     def __init__(self, frequency, **kwargs):
@@ -36,7 +32,7 @@ class SENSEModifierDaemon(DaemonBase):
         all_reqs = Request.get_by_status(statuses=["STALE", "PROVISIONED"], session=session)
         modifying_rule_ids = set()
         for req_ in all_reqs:
-            if req_.sense_circuit_status and re.match(r"(MODIFY) - (COMMITTING|COMMITTED)", req_.sense_circuit_status):
+            if is_being_modified(req_.sense_circuit_status):
                 modifying_rule_ids.add(req_.rule_id)
         
         # Only skip requests that are already being modified, allow others to proceed
@@ -55,7 +51,7 @@ class SENSEModifierDaemon(DaemonBase):
                 
             try:
                 status = req.sense_circuit_status
-                if not status or not re.match(r"(CREATE|MODIFY|REINSTATE) - READY$", status):
+                if not is_ready_for_modify(status):
                     logging.debug(f"Cannot modify request {req.rule_id} in status '{status}', will try again later")
                     continue
                     
@@ -64,39 +60,21 @@ class SENSEModifierDaemon(DaemonBase):
                     logging.error(f"No VLAN range found for {req.rule_id}")
                     continue
                     
-                response = self._modify_request(req, vlan_range, session=session)
+                modify_link(
+                    sense_uuid=req.sense_uuid,
+                    profile_uuid=self.profile_uuid,
+                    bandwidth_mbps=req.allocated_bandwidth_mbps,
+                    src_site=req.src_site,
+                    dst_site=req.dst_site,
+                    src_ip_range=req.src_endpoint.ip_range,
+                    dst_ip_range=req.dst_endpoint.ip_range,
+                    vlan_range=vlan_range,
+                    rule_id=req.rule_id
+                )
                 
                 req.set_status(status="PROVISIONED", session=session)
                 logging.info(f"Successfully modified request {req.rule_id}")
                 
             except Exception as e:
                 logging.error(f"Failed to modify link for {req.rule_id}: {e}", exc_info=True)
-
-    def _modify_request(self, req, vlan_range, session=None):
-        try:
-            workflow_api = WorkflowCombinedApi()
-            workflow_api.si_uuid = req.sense_uuid
-            intent = {
-                "service_profile_uuid": self.profile_uuid,
-                "queries": [
-                    {
-                        "ask": "edit",
-                        "options": [
-                            {"data.connections[0].bandwidth.capacity": str(int(req.allocated_bandwidth_mbps))},
-                            {"data.connections[0].terminals[0].uri": Site.get_by_name(name=req.src_site.name, session=session, use_lock=False).sense_uri},
-                            {"data.connections[0].terminals[0].ipv6_prefix_list": req.src_endpoint.ip_range},
-                            {"data.connections[0].terminals[1].uri": Site.get_by_name(name=req.dst_site.name, session=session, use_lock=False).sense_uri},
-                            {"data.connections[0].terminals[1].ipv6_prefix_list": req.dst_endpoint.ip_range},
-                            {"data.connections[0].terminals[0].vlan_tag": vlan_range},
-                            {"data.connections[0].terminals[1].vlan_tag": vlan_range}
-                        ]
-                    }
-                ],
-                "alias": req.rule_id
-            }
-            response = workflow_api.instance_modify(json.dumps(intent), sync="true")
-            return response
-        except Exception as e:
-            logging.error(f"Failed to modify request {req.rule_id}: {e}")
-            raise e
             

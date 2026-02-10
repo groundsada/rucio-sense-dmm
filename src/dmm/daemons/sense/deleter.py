@@ -1,12 +1,11 @@
 import logging
-import re
 
 from dmm.daemons.base import DaemonBase
 
 from dmm.db.session import databased
 from dmm.models.request import Request
 
-from sense.client.workflow_combined_api import WorkflowCombinedApi
+from dmm.core.sense import delete_instance, is_cancel_ready
 
 class SENSEDeleterDaemon(DaemonBase):
     def __init__(self, frequency, **kwargs):
@@ -28,16 +27,14 @@ class SENSEDeleterDaemon(DaemonBase):
                 continue
                 
             try:
-                workflow_api = WorkflowCombinedApi()
                 status = req.sense_circuit_status
                 
-                # Only delete if in CANCEL-READY or if status is None/UNKNOWN
-                if status and not re.match(r"(CANCEL) - READY$", status):
+                if status and not is_cancel_ready(status):
                     logging.debug(f"Request {req.sense_uuid} not in cancel-ready status (current: {status}), will try to delete again later")
                     continue
                     
                 logging.info(f"Deleting SENSE instance {req.sense_uuid} for request {req.rule_id}")
-                response = workflow_api.instance_delete(si_uuid=req.sense_uuid)
+                delete_instance(req.sense_uuid)
                 req.set_status(status="DELETED", session=session)
                 logging.info(f"Successfully deleted SENSE instance for request {req.rule_id}")
                 

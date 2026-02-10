@@ -6,7 +6,10 @@ from dmm.daemons.base import DaemonBase
 from dmm.models.request import Request
 from dmm.db.session import databased
 
+from dmm.core.rucio import get_rule_status, is_rule_ok, is_rule_stuck
+
 from rucio.common.exception import RuleNotFound
+
 
 class RucioFinisherDaemon(DaemonBase):
     def __init__(self, frequency, **kwargs):
@@ -26,18 +29,18 @@ class RucioFinisherDaemon(DaemonBase):
 
     def _process_request(self, req, client, session):
         try:
-            status = client.get_replication_rule(req.rule_id)['state']
+            status = get_rule_status(client, req.rule_id)
         except RuleNotFound as e:
             logging.error(f"Request {req.rule_id} not found in Rucio (probably because of the reaper), marking as FINISHED in DMM")
             req.set_status(status="FINISHED", session=session)
             return
             
-        if status == "OK":
+        if is_rule_ok(status):
             logging.debug(f"Request {req.rule_id} finished with status {status}")
             req.set_status(status="FINISHED", session=session)  # Mark request as finished
             req.update({"rucio_finished_at": datetime.now()}, session=session)
             req.set_fts_streams(current=0, session=session)  # Remove FTS limits
-        elif status == "STUCK":
+        elif is_rule_stuck(status):
             logging.debug(f"Request {req.rule_id} is stuck, marking as FINISHED in DMM so circuit can be taken down")
             req.set_status(status="FINISHED", session=session)
             req.update({"rucio_finished_at": datetime.now()}, session=session)

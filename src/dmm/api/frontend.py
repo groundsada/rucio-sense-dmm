@@ -1,7 +1,6 @@
 import logging
 import os
 import asyncio
-import re
 from datetime import datetime
 
 from fastapi import FastAPI, HTTPException, Request
@@ -13,8 +12,8 @@ from dmm.db.session import databased
 from dmm.models.request import Request as DBRequest
 from dmm.models.site import Site
 from dmm.core.config import config_get_int
+from dmm.core.allocation import refresh_all_sites
 
-from dmm.daemons.core.sites import RefreshSiteDBDaemon
 from rucio.client import Client
 
 current_directory = os.path.dirname(os.path.abspath(__file__))
@@ -155,10 +154,11 @@ async def reinitialize_request(request: Request, session=None):
 
 
 @api.post("/refresh_sites")
-async def refresh_sites():
+@databased
+async def refresh_sites(session=None):
     try:
-        daemon = RefreshSiteDBDaemon(frequency=1)
-        daemon.run_once(client=Client(), session=None)
+        client = Client()
+        refresh_all_sites(client, session)
         return "Sites refreshed"
     except Exception as e:
         logging.error(e)

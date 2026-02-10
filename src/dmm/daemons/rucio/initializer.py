@@ -6,6 +6,14 @@ from dmm.models.site import Site
 from dmm.db.session import databased
 
 from dmm.core.config import config_get_int
+from dmm.core.rucio import (
+    list_replication_rules,
+    get_rule_size,
+    parse_rule_for_request,
+    is_sense_rule,
+    is_rule_ok,
+    is_rule_stuck
+)
 
 class RucioInitDaemon(DaemonBase):
     """
@@ -23,7 +31,7 @@ class RucioInitDaemon(DaemonBase):
         Process Rucio rules and create requests in the database.
         """
         try:
-            rules = client.list_replication_rules()
+            rules = list_replication_rules(client)
         except Exception as e:
             logging.error(f"Failed to list Rucio rules: {e}", exc_info=True)
             return
@@ -35,10 +43,10 @@ class RucioInitDaemon(DaemonBase):
                     continue
                 
                 rule_state = rule.get("state")
-                if rule_state == "OK":
+                if is_rule_ok(rule_state):
                     logging.debug(f"Rule {rule['id']} is already finished; skipping.")
                     continue
-                elif rule_state == "STUCK":
+                elif is_rule_stuck(rule_state):
                     logging.debug(f"Rule {rule['id']} is stuck; skipping.")
                     continue
 
@@ -59,51 +67,40 @@ class RucioInitDaemon(DaemonBase):
         """
         return Request.get_by_id(rule["id"], session=session, use_lock=False) is not None
 
-    def _get_rule_size(self, rule, client) -> int:
-        """
-        Get the total size of the files in the rule (in bytes).
-        """
-        try:
-            files = list(client.list_files(scope=rule["scope"], name=rule["name"]))
-            total_bytes = sum([f.get("bytes", 0) for f in files if f.get("bytes") is not None])
-            return total_bytes if total_bytes > 0 else 0
-        except Exception as e:
-            logging.error(f"Failed to get rule size for rule {rule['id']}: {e}", exc_info=True)
-            return 0  # Return 0 instead of None to avoid database issues
-
     def _create_request_from_rule(self, rule, client, session) -> Request:
         """
         Create a new request from the given rule.
         """
-        src_site_name = rule.get("source_replica_expression")
-        dst_site_name = rule.get("rse_expression")
+        rule_info = parse_rule_for_request(rule)
+        
+        src_site_name = rule_info['src_site_name']
+        dst_site_name = rule_info['dst_site_name']
         
         if not src_site_name or not dst_site_name:
-            raise ValueError(f"Rule {rule['id']} missing source or destination site expression")
+            raise ValueError(f"Rule {rule_info['rule_id']} missing source or destination site expression")
         
         src_site = Site.get_by_name(src_site_name, session=session, use_lock=False)
         dst_site = Site.get_by_name(dst_site_name, session=session, use_lock=False)
         
         if not src_site:
-            raise ValueError(f"Source site '{src_site_name}' not found in database for rule {rule['id']}")
+            raise ValueError(f"Source site '{src_site_name}' not found in database for rule {rule_info['rule_id']}")
         if not dst_site:
-            raise ValueError(f"Destination site '{dst_site_name}' not found in database for rule {rule['id']}")
+            raise ValueError(f"Destination site '{dst_site_name}' not found in database for rule {rule_info['rule_id']}")
 
-        priority = rule.get("priority", 3)  # Default priority if not specified
+        priority = rule_info['priority']
         fts_streams_desired = config_get_int("fts", "default_num_streams", default=20)
 
-        activity = rule.get("activity")  # activity for SENSE rules contains SENSE
-        if activity and "sense" in activity.lower():
-            logging.debug(f"Rule {rule['id']} identified as a SENSE rule.")
+        if is_sense_rule(rule):
+            logging.debug(f"Rule {rule_info['rule_id']} identified as a SENSE rule.")
             transfer_status = "INIT"
         else:
-            logging.debug(f"Rule {rule['id']} is not a SENSE rule; setting status to 'NOT_SENSE'.")
+            logging.debug(f"Rule {rule_info['rule_id']} is not a SENSE rule; setting status to 'NOT_SENSE'.")
             transfer_status = "NOT_SENSE"
 
-        rule_size = self._get_rule_size(rule, client)
+        rule_size = get_rule_size(client, rule_info['scope'], rule_info['name'])
 
         return Request(
-            rule_id=rule["id"],
+            rule_id=rule_info['rule_id'],
             src_site=src_site,
             dst_site=dst_site,
             priority=priority,

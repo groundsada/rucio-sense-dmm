@@ -1,5 +1,4 @@
 import logging
-import ipaddress
 
 from dmm.daemons.base import DaemonBase
 
@@ -8,7 +7,11 @@ from dmm.models.endpoint import Endpoint
 
 from dmm.db.session import databased
 
-from sense.client.address_api import AddressApi
+from dmm.core.allocation import (
+    allocate_address,
+    free_address,
+    format_ipv6_compressed
+)
 
 class AllocatorDaemon(DaemonBase):
     def __init__(self, frequency, **kwargs):
@@ -24,10 +27,10 @@ class AllocatorDaemon(DaemonBase):
             return
         
         for new_request in reqs_init:  
-            if self._reuse_finished_request(new_request, session): # check if we can reuse a finished request
+            if self._reuse_finished_request(new_request, session):  # check if we can reuse a finished request
                 continue
             
-            self._allocate_new_endpoints(new_request, session) # if not found, allocate new endpoints
+            self._allocate_new_endpoints(new_request, session)  # if not found, allocate new endpoints
 
     def _reuse_finished_request(self, new_request, session) -> bool:
         """
@@ -65,13 +68,13 @@ class AllocatorDaemon(DaemonBase):
         endpoints_marked = False
         
         try:
-            # Get allocations
-            src_allocation = self._get_allocation(new_request.src_site.name, new_request.rule_id)
-            dst_allocation = self._get_allocation(new_request.dst_site.name, new_request.rule_id)
+            # Get allocations using core allocation functions
+            src_allocation = allocate_address(new_request.src_site.name, new_request.rule_id)
+            dst_allocation = allocate_address(new_request.dst_site.name, new_request.rule_id)
             
             # Format IP addresses consistently
-            free_src_ipv6 = ipaddress.IPv6Network(src_allocation).compressed
-            free_dst_ipv6 = ipaddress.IPv6Network(dst_allocation).compressed
+            free_src_ipv6 = format_ipv6_compressed(src_allocation)
+            free_dst_ipv6 = format_ipv6_compressed(dst_allocation)
             
             # Atomically check and lock endpoints using SELECT FOR UPDATE
             # This prevents race conditions between checking allocation status and marking as allocated
@@ -133,17 +136,17 @@ class AllocatorDaemon(DaemonBase):
                     logging.error(f"Failed to free endpoints for {new_request.rule_id}: {endpoint_err}")
                     session.rollback()
             
-            # Clean up SENSE-O allocations
+            # Clean up SENSE-O allocations using core allocation functions
             if src_allocation:
                 try:
-                    self._free_allocation(new_request.src_site.name, new_request.rule_id)
+                    free_address(new_request.src_site.name, new_request.rule_id)
                     logging.info(f"Freed source allocation for {new_request.rule_id}")
                 except Exception as free_err:
                     logging.error(f"Failed to free source allocation for {new_request.rule_id}: {free_err}")
                     
             if dst_allocation:
                 try:
-                    self._free_allocation(new_request.dst_site.name, new_request.rule_id)
+                    free_address(new_request.dst_site.name, new_request.rule_id)
                     logging.info(f"Freed destination allocation for {new_request.rule_id}")
                 except Exception as free_err:
                     logging.error(f"Failed to free destination allocation for {new_request.rule_id}: {free_err}")
@@ -152,38 +155,3 @@ class AllocatorDaemon(DaemonBase):
             new_request.set_status("FAILED", session=session)
             session.commit()
             logging.error(f"Failed to allocate endpoints for request {new_request.rule_id}: {str(e)}", exc_info=True)
-
-    def _get_allocation(self, sitename, alloc_name) -> str:
-        """
-        Get an allocation from SENSE-O using the addressApi
-        @param sitename: name of the site (used for the address pool)
-        @param alloc_name: alias for the allocation used in SENSE-O, this is just the rule_id
-        """
-        addressApi = AddressApi()
-        pool_name = f"RUCIO_Site_BGP_Subnet_Pool-{sitename}"
-        alloc_type = "IPv6"
-        try:
-            logging.debug(f"Getting IPv6 allocation for {sitename}")
-            response = addressApi.allocate_address(pool_name, alloc_type, alloc_name, netmask="/64", batch="subnet")
-            #TODO: there is a possibility that the address pool does not exist, in this case return an error and mark the request as failed
-            logging.debug(f"Got allocation: {response} for {sitename}")
-            return response
-        except Exception as e:
-            logging.error(f"get_allocation: {str(e)}")
-            addressApi.free_address(pool_name, name=alloc_name)
-            raise e
-
-    def _free_allocation(self, sitename, alloc_name) -> bool:
-        """
-        Free an allocation from SENSE-O (in case of failure of allocation)
-        """
-        try:
-            logging.debug(f"Freeing IPv6 allocation {alloc_name}")
-            addressApi = AddressApi()
-            pool_name = f'RUCIO_Site_BGP_Subnet_Pool-{sitename}'
-            addressApi.free_address(pool_name, name=alloc_name)
-            logging.debug(f"Allocation {alloc_name} freed for {sitename}")
-            return True
-        except Exception as e:
-            logging.error(f"free_allocation: {str(e)}")
-            raise ValueError(f"Freeing allocation failed for {sitename} and {alloc_name}")

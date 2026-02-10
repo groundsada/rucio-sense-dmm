@@ -1,6 +1,5 @@
 import logging
-from datetime import datetime, timezone
-import re
+from datetime import datetime
 
 from dmm.daemons.base import DaemonBase
 
@@ -8,8 +7,12 @@ from dmm.db.session import databased
 from dmm.models.request import Request
 
 from dmm.core.config import config_get_int
-
-from sense.client.workflow_combined_api import WorkflowCombinedApi
+from dmm.core.sense import (
+    cancel_link,
+    is_cancel_ready,
+    is_create_compiled,
+    is_ready_for_cancel
+)
 
 class SENSECancellerDaemon(DaemonBase):
     def __init__(self, frequency, **kwargs):
@@ -41,30 +44,27 @@ class SENSECancellerDaemon(DaemonBase):
                     continue
 
                 logging.info(f"Cancelling SENSE link with uuid {req.sense_uuid} for request {req.rule_id}")
-                workflow_api = WorkflowCombinedApi()
                 status = req.sense_circuit_status
                 
-                if status and re.match(r"(CANCEL) - READY$", status):
+                if is_cancel_ready(status):
                     logging.debug(f"Request {req.sense_uuid} already in cancel-ready status, marking as canceled")
                     req.src_endpoint.set_allocated(is_allocated=False, session=session)
                     req.dst_endpoint.set_allocated(is_allocated=False, session=session)
                     req.set_status(status="CANCELED", session=session)
                     continue
                     
-                if status and re.match(r"(CREATE) - COMPILED$", status):
+                if is_create_compiled(status):
                     logging.debug(f"Request {req.sense_uuid} in compiled status, safe to mark as canceled without cancellation")
                     req.src_endpoint.set_allocated(is_allocated=False, session=session)
                     req.dst_endpoint.set_allocated(is_allocated=False, session=session)
                     req.set_status(status="CANCELED", session=session)
                     continue
                     
-                if status and not re.match(r"(CREATE|MODIFY|REINSTATE) - READY$", status):
+                if not is_ready_for_cancel(status):
                     logging.debug(f"Cannot cancel instance {req.sense_uuid} in status '{status}', will try again later")
                     continue
                     
-                # Force cancel if not in READY state
-                force_cancel = "READY" not in (status or "")
-                response = workflow_api.instance_operate("cancel", si_uuid=req.sense_uuid, sync="true", force=str(force_cancel).lower())
+                cancel_link(req.sense_uuid, status)
                 
                 req.src_endpoint.set_allocated(is_allocated=False, session=session)
                 req.dst_endpoint.set_allocated(is_allocated=False, session=session)
