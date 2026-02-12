@@ -11,6 +11,7 @@ db_name=dmm
 
 [sense]
 profile_uuid=
+sense_keep_alive_seconds=60
 
 [prometheus]
 host=
@@ -24,6 +25,9 @@ key=/opt/certs/key.pem
 monit_host=https://monit-grafana.cern.ch
 monit_auth_token=
 default_num_streams=20
+
+[rucio]
+max_retries=1
 
 [fts-streams]
 T2_US_SDSC-T2_US_Caltech=400

@@ -1,27 +1,10 @@
-import logging
-import sys
 import os
 import argparse
+import logging
+import threading
 
-argparser = argparse.ArgumentParser()
-
-argparser.add_argument("--log-level", default="debug", help="Set the log level")
-argparser.add_argument("--config", help="Path to the configuration file")
-args = argparser.parse_args()
-
-if args.config:
-    os.environ["DMM_CONFIG"] = args.config
-
-# logging needs to be configured before importing other modules
-logging.basicConfig(
-    format="(%(threadName)s) [%(asctime)s] %(levelname)s: %(message)s",
-    datefmt="%m-%d-%Y %H:%M:%S %p",
-    level=getattr(logging, args.log_level.upper()),
-    handlers=[logging.FileHandler(filename="dmm.log"), logging.StreamHandler(sys.stdout)]
-)
-
-from multiprocessing import Lock
-import uvicorn # web server for the frontend
+import multiprocessing
+import uvicorn
 
 from rucio.client import Client
 from dmm.core.config import config_get_int
@@ -59,17 +42,35 @@ class DMM:
         self.sites_frequency = config_get_int("daemons", "db", default=7200, constraint="nonneg")
         self.fts_frequency = config_get_int("daemons", "fts", default=60)
 
-        self.lock = Lock()
-        
+        self.lock = threading.Lock()
+        self.running = True
+        self.threads = []
+
         try:
             self.rucio_client = Client()
         except Exception as e:
             logging.error(f"Failed to initialize Rucio client: {e}")
             raise ConnectionError("Failed to initialize Rucio client, exiting...")
     
+    @staticmethod
+    def run_server(port):
+        try:
+            uvicorn.run(api, host="0.0.0.0", port=port)
+        except:
+            logging.error(f"Failed to start frontend on {port}, trying default port 31601")
+            uvicorn.run(api, host="0.0.0.0", port=31601)
+
     def start(self) -> None:
         logging.info("Starting Daemons")
+        
+        logging.info("Initializing site database - this must complete before other daemons start")
         sitedb = RefreshSiteDBDaemon(frequency=self.sites_frequency, kwargs={"client": self.rucio_client})
+        try:
+            sitedb.run_once(client=self.rucio_client, session=None)
+            logging.info("Site database initialization completed successfully")
+        except Exception as e:
+            logging.error(f"Failed to initialize site database: {e}", exc_info=True)
+            logging.warning("Continuing with daemon startup, but some daemons may fail without site data")
         
         allocator = AllocatorDaemon(frequency=self.dmm_frequency)
         decider = DeciderDaemon(frequency=self.dmm_frequency)
@@ -88,30 +89,47 @@ class DMM:
         canceller = SENSECancellerDaemon(frequency=self.sense_frequency)
         deleter = SENSEDeleterDaemon(frequency=self.sense_frequency)
 
-        sitedb.start(self.lock)
-        fts.start(self.lock)
-        allocator.start(self.lock)
-        decider.start(self.lock)
-        monit.start(self.lock)
-        rucio_init.start(self.lock)
-        rucio_modifier.start(self.lock)
-        rucio_finisher.start(self.lock)
-        sense_updater.start(self.lock)
-        stager.start(self.lock)
-        provision.start(self.lock)
-        sense_modifier.start(self.lock)
-        canceller.start(self.lock)
-        deleter.start(self.lock)
+        daemons = [
+            sitedb, fts, allocator, decider, monit,
+            rucio_init, rucio_modifier, rucio_finisher,
+            sense_updater, stager, provision, sense_modifier,
+            canceller, deleter
+        ]
 
-        try:
-            # start the frontend and listen on all interfaces
-            uvicorn.run(api, host="0.0.0.0", port=self.port)
-        except:
-            # if port is not available, try default port 31601
-            logging.error(f"Failed to start frontend on {self.port}, trying default port 31601")
-            uvicorn.run(api, host="0.0.0.0", port=31601)
+        logging.info("Starting all daemon threads")
+        for daemon in daemons:
+            thread = daemon.start(self.lock)
+            if thread:
+                self.threads.append(thread)
+
+        frontend_process = multiprocessing.Process(target=self.run_server, args=(self.port,), name="Frontend")
+        frontend_process.start()
+        
+        logging.info("All daemons and frontend started successfully")
+
+    def stop(self) -> None:
+        logging.info("Stopping DMM and all daemons")
+        self.running = False
+        
+        for thread in self.threads:
+            if thread.is_alive():
+                thread.join(timeout=10)
+        
+        logging.info("DMM stopped successfully")
 
 def main():
+    argparser = argparse.ArgumentParser()
+    argparser.add_argument("--config", help="Path to the configuration file")
+
+    args = argparser.parse_args()
+
+    if args.config:
+        os.environ["DMM_CONFIG"] = args.config
+
     logging.info("Starting DMM")
     dmm = DMM()
     dmm.start()
+        
+
+if __name__ == "__main__":
+    main()

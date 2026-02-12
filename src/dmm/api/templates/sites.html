@@ -36,7 +36,7 @@
                     <td>
                         <ul>
                             {% for endpoint in site.endpoints %}
-                            <li class="{{ 'red' if endpoint.in_use else '' }}">
+                            <li class="{{ 'red' if endpoint.is_allocated else '' }}">
                                 {{ endpoint.hostname }}
                             </li>
                             {% endfor %}
@@ -45,7 +45,7 @@
                     <td>
                         <ul>
                             {% for endpoint in site.endpoints %}
-                            <li class="{{ 'red' if endpoint.in_use else '' }}">
+                            <li class="{{ 'red' if endpoint.is_allocated else '' }}">
                                 {{ endpoint.ip_range }}
                             </li>
                             {% endfor %}

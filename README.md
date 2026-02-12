@@ -1,44 +1,79 @@
 # Data Movement Manager (DMM)
 
-Data Movement Manager (DMM) for the Rucio-SENSE interoperation prototype.
-DMM is the interface between Rucio (/FTS) and SENSE, making SDN operated HEP data-flows possible
+Data Movement Manager (DMM) provides the interface layer between Rucio/FTS and SENSE for the Rucio-SENSE interoperation framework. 
+DMM enables Software-Defined Networking (SDN) operated high-energy physics (HEP) data flows by orchestrating network-aware data transfers.
 
-The application is organized into several components that run as daemons on separate threads and evaluate requests based on their status in DMM, e.g. the `SENSE PROVISIONER` only operates on requests which are in the `DECIDED` state etc.
+## Prerequisites
 
-## Project Structure
+- **Rucio Server**: Must be running and accessible (with DMM patch applied)
+- **PostgreSQL**: Must be running and reachable by DMM.
+- **Certificates**: Valid X.509 host certificates for authentication with FTS.
+- **SENSE OAuth**: Configured `.sense-o-auth.yaml` credentials
+- **Kubernetes**: (for Kubernetes deployment, NRP is recommended)
+- **Docker**: (for Docker deployment)
 
-- **daemons/**  
-  Contains various background worker processes (daemons) that handle operations such as decision making, monitoring, and interfacing with external systems.
-  - **core/** – Daemons related to core operations (e.g. allocation, decision, monitoring, refreshing site information). See [`daemons/core/monit.py`](daemons/core/monit.py) for the monitoring daemon and [`daemons/core/decider.py`](daemons/core/decider.py) for decision logic.
-  - **fts/** – Daemons for managing FTS (File Transfer Service) configurations and modifications. For example, see [`daemons/fts/modifier.py`](daemons/fts/modifier.py).
-  - **rucio/** – Daemons to initialize and modify Rucio rules, such as in [`daemons/rucio/initializer.py`](daemons/rucio/initializer.py).
-  - **sense/** – Daemons managing SENSE operations. This includes several processes:  
-    - Handler: [`daemons/sense/handler.py`](daemons/sense/handler.py)  
-    - Canceller: [`daemons/sense/canceller.py`](daemons/sense/canceller.py)  
-    - Additional SENSE related daemons (e.g. provisioner, stager, modifier) are organized similarly.
+## Configuration
 
-- **db/**  
-  Contains database models and session management. Key models include:
-  - Site, Request, Endpoint, Mesh. For example, see [`db/site.py`](db/site.py) and [`db/request.py`](db/request.py).
+DMM requires the following configuration files:
 
-- **frontend/**  
-  Implements a FastAPI web frontend that serves templates and static files.
-  - The FastAPI application is defined in [`frontend/frontend.py`](frontend/frontend.py).
-  - HTML templates are stored in the [`frontend/templates`](frontend/templates) folder (e.g. [`frontend/templates/index.html`](frontend/templates/index.html) and [`frontend/templates/sites.html`](frontend/templates/sites.html)).
-  - Static assets such as CSS are located in [`frontend/static`](frontend/static) (e.g. [`frontend/static/styles.css`](frontend/static/styles.css)).
+1. **`dmm.cfg`**: DMM-specific configuration, refer to the sample config for an example.
+2. **`rucio.cfg`**: Rucio client configuration
+3. **X.509 Certificates**: Host certificate and key (`hostcert.pem`, `hostcert.key.pem`)
+4. **`.sense-o-auth.yaml`**: SENSE OAuth credentials
 
-- **main/**  
-  Contains the main startup logic where various daemon instances are created and the web frontend is launched. See [`main/dmm.py`](main/dmm.py).
+## Deployment
 
-- **utils/**  
-  Provides utility functions and configuration management. For example:
-  - Configuration parsing is implemented in [`utils/config.py`](utils/config.py).
-  - Additional utilities are located in modules such as [`utils/monit.py`](utils/monit.py).
+### Option 1: Kubernetes (Recommended for Production)
 
-## Setup
-### Running in Kubernetes (Recommended)
-1. Create Configuration Secrets (see etc/mksecrets.sh)
-2. Create Deployment
+#### 1. Create Configuration Secrets
+
+```bash
+cd etc/
+./mksecrets.sh
 ```
+
+#### 3. Initialize RSEs in Rucio
+
+Ensure all required Rucio Storage Elements (RSEs) are configured before deploying DMM. If RSEs are added later, use the "Refresh Sites" button in the DMM web interface (Sites tab).
+
+#### 4. Deploy to Kubernetes
+
+```bash
 kubectl apply -f etc/deploy.yaml
 ```
+
+The deployment includes an embedded PostgreSQL instance. For production environments, consider using an external managed database service.
+
+### Option 2: Docker
+
+#### 1. Start PostgreSQL
+
+```bash
+docker run -d \
+  --name dmm-postgres \
+  -e POSTGRES_PASSWORD=your_secure_password \
+  -e POSTGRES_DB=dmm \
+  -p 5432:5432 \
+  postgres:14
+```
+
+#### 2. Run DMM Container
+
+```bash
+docker run -d \
+  --name dmm \
+  -v $HOME/private/dmm.cfg:/opt/dmm/dmm.cfg \
+  -v $HOME/private/rucio.cfg:/opt/rucio/etc/rucio.cfg \
+  -v $HOME/private/certs/rucio-sense/hostcert.pem:/opt/certs/cert.pem \
+  -v $HOME/private/certs/rucio-sense/hostcert.key.pem:/opt/certs/key.pem \
+  -v $HOME/.sense-o-auth.yaml:/root/.sense-o-auth.yaml \
+  aaarora/dmm:latest
+```
+
+## Monitoring and Management
+
+Access the DMM web frontend to monitor data flows and manage site configurations. The interface provides:
+
+- Real-time transfer status monitoring
+- Site/RSE management (with refresh capability)
+- Network provisioning status

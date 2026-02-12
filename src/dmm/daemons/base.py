@@ -1,5 +1,5 @@
 import logging
-from multiprocessing import Process
+import threading
 from time import sleep
 import os
 
@@ -7,7 +7,8 @@ class DaemonBase:
     def __init__(self, frequency, kwargs={}):
         self.frequency = frequency
         self.kwargs = kwargs
-        self.pid = None
+        self.thread = None
+        self.running = True
 
     def process(self):
         raise NotImplementedError("Subclasses must implement this method")
@@ -17,31 +18,45 @@ class DaemonBase:
 
     def run_daemon(self, process, lock, **kwargs):
         if self.frequency < 0:
-            logging.info(f"{self.__class__.__name__} frequency is set to negative, not starting the daemon.")
+            logging.info(f"frequency is set to negative, not starting the daemon.")
             return
-        while True:
-            with lock:
-                logging.debug(f"{self.__class__.__name__} acquired lock")
-                try:
-                    process(**kwargs)
-                except Exception as e:
-                    logging.error(f"Error in {self.__class__.__name__}: {e}")
-            logging.debug(f"{self.__class__.__name__} released lock, sleeping for {self.frequency} seconds")
-            sleep(self.frequency)
+        
+        while self.running:
+            try:
+                with lock:
+                    logging.debug(f"acquired lock")
+                    try:
+                        process(**kwargs)
+                    except Exception as e:
+                        logging.error(f"Error in {self.__class__.__name__}: {e}", exc_info=True)
+                logging.debug(f"released lock, sleeping for {self.frequency} seconds")
+            except Exception as e:
+                logging.error(f"Unexpected error: {e}", exc_info=True)
+            
+            # Sleep in smaller intervals to allow for faster shutdown
+            sleep_remaining = self.frequency
+            while sleep_remaining > 0 and self.running:
+                sleep(min(1, sleep_remaining))
+                sleep_remaining -= 1
 
     def start(self, lock):
         logging.info(f"Starting {self.__class__.__name__}")
         try:
-            proc = Process(target=self.run_daemon,
-                        args=(self.process, lock),
-                        kwargs=self.kwargs,
-                        name=self.__class__.__name__)
-            proc.start()
-            self.pid = proc.pid
+            self.thread = threading.Thread(
+                target=self.run_daemon,
+                args=(self.process, lock),
+                kwargs=self.kwargs,
+                name=self.__class__.__name__,
+                daemon=True
+            )
+            self.thread.start()
+            return self.thread
         except Exception as e:
-            logging.error(f"Error starting {self.__class__.__name__}: {e}")
+            logging.error(f"Error starting {self.__class__.__name__}: {e}", exc_info=True)
+            return None
 
     def stop(self):
         logging.info(f"Stopping {self.__class__.__name__}")
-        if self.pid:
-            os.kill(self.pid, 9)
+        self.running = False
+        if self.thread and self.thread.is_alive():
+            self.thread.join(timeout=10)

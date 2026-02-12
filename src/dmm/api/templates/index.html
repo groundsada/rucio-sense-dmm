@@ -48,7 +48,7 @@
                     <td>{{ req.dst_endpoint.hostname }}</td>
                     <td>{{ req.priority }}</td>
                     <td>{{ req.rule_size / 1024 / 1024 / 1024 }}</td>
-                    <td>{{ req.bandwidth / 1000 if req.bandwidth is not none else 0 }}</td>
+                    <td>{{ req.allocated_bandwidth_mbps / 1000 if req.allocated_bandwidth_mbps is not none else 0 }}</td>
                     <td><button onclick="sendRuleID(this)">See More</button></td>
                 </tr>
                 {% endfor %}

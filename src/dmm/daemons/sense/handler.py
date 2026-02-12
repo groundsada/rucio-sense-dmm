@@ -1,16 +1,17 @@
 import logging
-from datetime import datetime, timezone
-import json
-import ipaddress
-import re
+from datetime import datetime
 
 from dmm.core.config import config_get_int
 from dmm.daemons.base import DaemonBase
 from dmm.models.request import Request
 from dmm.db.session import databased
 
-from sense.client.workflow_combined_api import WorkflowCombinedApi
-from sense.client.address_api import AddressApi
+from dmm.core.sense import (
+    get_instance_status,
+    affiliate_endpoints,
+    is_affiliated_state,
+    is_create_ready
+)
 
 class SENSEHandlerDaemon(DaemonBase):
     def __init__(self, frequency, **kwargs):
@@ -21,7 +22,7 @@ class SENSEHandlerDaemon(DaemonBase):
 
     @databased
     def run_once(self, session=None):
-        reqs = Request.from_status(status=["STAGED", "PROVISIONED", "CANCELED", "STALE", "DECIDED", "FINISHED"], session=session)
+        reqs = Request.get_by_status(statuses=["STAGED", "PROVISIONED", "CANCELED", "STALE", "DECIDED", "FINISHED"], session=session)
         if not reqs:
             return
         
@@ -29,23 +30,30 @@ class SENSEHandlerDaemon(DaemonBase):
             if req.sense_uuid is None:
                 continue
 
-            workflow_api = WorkflowCombinedApi()
+            status = get_instance_status(req.sense_uuid)
+            req.set_sense_circuit_status(status=status, session=session)
 
-            status = workflow_api.instance_get_status(si_uuid=req.sense_uuid) or "UNKNOWN"
-            req.update_sense_circuit_status(status=status, session=session)
-
-            if not req.sense_affiliated and re.match(r"(CREATE) - (COMPILED|COMMITTED|COMMITTING|READY)$", status):
+            # Affiliate endpoints when ready
+            if not req.sense_affiliated and is_affiliated_state(status):
                 logging.debug(f"Request {req.rule_id} is not affiliated with SENSE instance {req.sense_uuid}, affiliating now.")
-                self._affiliate_endpoints(req, workflow_api)
+                affiliate_endpoints(
+                    sense_uuid=req.sense_uuid,
+                    src_site_name=req.src_site.name,
+                    dst_site_name=req.dst_site.name,
+                    src_ip_range=req.src_endpoint.ip_range,
+                    dst_ip_range=req.dst_endpoint.ip_range,
+                    sense_src_uri=req.sense_src_uri,
+                    sense_dst_uri=req.sense_dst_uri
+                )
                 req.update({"sense_affiliated": True}, session=session)
 
-            # update sense_provisioned_at if the status is COMPILED for monit
-            if not req.sense_provisioned_at and re.match(r"(CREATE) - READY$", status):
+            # Update sense_provisioned_at if the status is READY for monitoring
+            if not req.sense_provisioned_at and is_create_ready(status):
                 logging.debug(f"Request {req.rule_id} is ready, updating sense_provisioned_at to current time.")
-                req.update({"sense_provisioned_at": datetime.now()})
+                req.update({"sense_provisioned_at": datetime.now()}, session=session)
             
-                fts_limit = config_get_int("fts-streams", f"{req.src_site.name}-{req.dst_site.name}", 200)
-                req.update_fts_limit_desired(limit=fts_limit, session=session)
+                fts_limit = config_get_int("fts-streams", f"{req.src_site.name}-{req.dst_site.name}", default=200)
+                req.set_fts_streams(desired=fts_limit, session=session)
 
             # TODO: if sense creation fails, should retry
             # at staging step, i.e. before create - committed: 
@@ -53,33 +61,3 @@ class SENSEHandlerDaemon(DaemonBase):
             # at provisioned step, i.e. after create - committed:
                 # should put in allocated state, so vlan allocation can be retried
             # at finished step, i.e. after cancel - committed: should force retry
-
-    def _affiliate_endpoints(self, req, workflow_api):
-        # Affiliate endpoints with this instance
-        address_api = AddressApi()
-
-        src_pool_name = f'RUCIO_Site_BGP_Subnet_Pool-{req.src_site.name}'
-        exploded_source_ip = self.format_ipv6(ipaddress.IPv6Network(req.src_endpoint.ip_range))
-        logging.debug(f"Affiliating source endpoint {exploded_source_ip} with SENSE instance {req.sense_uuid} in address pool {src_pool_name}")
-        address_api.affiliate_address(pool=src_pool_name, uri=req.source_affiliation_uri, address=exploded_source_ip)
-
-        dst_pool_name = f'RUCIO_Site_BGP_Subnet_Pool-{req.dst_site.name}'
-        exploded_dest_ip = self.format_ipv6(ipaddress.IPv6Network(req.dst_endpoint.ip_range))
-        logging.debug(f"Affiliating destination endpoint {exploded_dest_ip} with SENSE instance {req.sense_uuid} in address pool {dst_pool_name}")
-        address_api.affiliate_address(pool=dst_pool_name, uri=req.destination_affiliation_uri, address=exploded_dest_ip)
-    
-    @staticmethod
-    def _good_response(response):
-        return bool(response and not any("error" in r for r in response))
-
-    @staticmethod
-    def format_ipv6(ip):
-        exploded_ip = ip.network_address.exploded
-        segments = exploded_ip.split(":")
-        simplified_segments = []
-        for segment in segments:
-            if segment == "0000":
-                simplified_segments.append("0")
-            else:
-                simplified_segments.append(segment.lstrip("0") or "0")
-        return f"{':'.join(simplified_segments)}/{ip.prefixlen}"

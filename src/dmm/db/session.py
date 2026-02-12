@@ -1,5 +1,6 @@
 from functools import wraps
 from inspect import iscoroutinefunction
+import logging
 
 from sqlmodel import create_engine, Session
 
@@ -18,15 +19,20 @@ def get_engine():
             port = config_get("db", "db_port", default="5432")
             db_name = config_get("db", "db_name", default="dmm")
             _ENGINE = create_engine(
-            f"postgresql+psycopg2://{username}:{password}@{host}:{port}/{db_name}"
+                f"postgresql+psycopg2://{username}:{password}@{host}:{port}/{db_name}",
+                    pool_size=20,
+                    max_overflow=10,
+                    pool_timeout=30,
+                    pool_recycle=3600,
+                    pool_pre_ping=True
             )
         elif db_type == "sqlite":
             db_file = config_get("db", "db_file", default="dmm.db")
             _ENGINE = create_engine(
-            f"sqlite:///{db_file}"
+                f"sqlite:///{db_file}"
             )
         else:
-            raise ValueError(f"Unknown database type: {db_type}")
+            raise ValueError(f"Unknown database type: {db_type}, supported types are 'postgresql' and 'sqlite'")
     assert _ENGINE
     return _ENGINE
 
@@ -44,8 +50,9 @@ def databased(function):
                         kwargs['session'] = session
                         result = await function(*args, **kwargs)
                         session.commit()
-                    except:
+                    except Exception as e:
                         session.rollback()
+                        logging.error(f"Database error in {function.__name__}: {e}")
                         raise
             else:
                 result = await function(*args, **kwargs)
@@ -59,8 +66,9 @@ def databased(function):
                         kwargs['session'] = session
                         result = function(*args, **kwargs)
                         session.commit()
-                    except:
+                    except Exception as e:
                         session.rollback()
+                        logging.error(f"Database error in {function.__name__}: {e}")
                         raise
             else:
                 result = function(*args, **kwargs)

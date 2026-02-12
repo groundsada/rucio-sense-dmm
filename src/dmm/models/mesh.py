@@ -1,4 +1,4 @@
-from sqlmodel import Field, Relationship, or_
+from sqlmodel import Field, Relationship, or_, select
 from typing import Optional
 import logging
 
@@ -9,7 +9,7 @@ class Mesh(ModelBase, table=True):
     site_1: Optional[str] = Field(default=None, foreign_key='site.name')
     site_2: Optional[str] = Field(default=None, foreign_key='site.name')
     vlan_range: Optional[str] = Field(default=None)
-    link_capacity: Optional[int] = Field(default=None)
+    link_capacity_mbps: Optional[int] = Field(default=None)
 
     site1: Optional["Site"] = Relationship(sa_relationship_kwargs={"foreign_keys": "[Mesh.site_1]"})
     site2: Optional["Site"] = Relationship(sa_relationship_kwargs={"foreign_keys": "[Mesh.site_2]"})
@@ -18,28 +18,28 @@ class Mesh(ModelBase, table=True):
         super().__init__(**kwargs)
 
     @classmethod
-    def get_vlan_range(cls, site_1, site_2, session=None):
+    def get_vlan_range(cls, site_1, site_2, session=None, use_lock: bool = True):
         site_1_name = site_1.name if hasattr(site_1, 'name') else site_1
         site_2_name = site_2.name if hasattr(site_2, 'name') else site_2
 
-        logging.debug(f"MESH QUERY: checking if vlan range defined between {site_1_name} and {site_2_name}")
-        mesh = session.query(cls).filter(
-            or_(cls.site_1 == site_1_name, cls.site_1 == site_2_name),
-            or_(cls.site_2 == site_1_name, cls.site_2 == site_2_name)
-        ).first()
-        if not mesh:
-            return None
-        return mesh.vlan_range
+        logging.debug(f"MESH QUERY: vlan_range between {site_1_name} and {site_2_name}, locked={use_lock}")
+        statement = (
+            select(cls)
+            .where(or_(cls.site_1 == site_1_name, cls.site_1 == site_2_name))
+            .where(or_(cls.site_2 == site_1_name, cls.site_2 == site_2_name))
+        )
+        if use_lock:
+            statement = statement.with_for_update()
+        mesh = session.exec(statement).first()
+        return mesh.vlan_range if mesh else None
 
     @classmethod
-    def max_bandwidth(cls, site, session=None):
-        # Convert Site object to name if needed
+    def get_link_capacity(cls, site, session=None, use_lock: bool = True):
         site_name = site.name if hasattr(site, 'name') else site
         
-        logging.debug(f"MESH QUERY: checking if max bandwidth defined for {site_name}")
-        mesh = session.query(cls).filter(
-            or_(cls.site_1 == site_name, cls.site_2 == site_name)
-        ).first()
-        if not mesh:
-            return None
-        return mesh.link_capacity
+        logging.debug(f"MESH QUERY: link_capacity for {site_name}, locked={use_lock}")
+        statement = select(cls).where(or_(cls.site_1 == site_name, cls.site_2 == site_name))
+        if use_lock:
+            statement = statement.with_for_update()
+        mesh = session.exec(statement).first()
+        return mesh.link_capacity_mbps if mesh else None
