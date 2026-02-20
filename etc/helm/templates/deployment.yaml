@@ -1,0 +1,75 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "dmm.fullname" . }}
+  labels:
+    {{- include "dmm.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "dmm.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "dmm.selectorLabels" . | nindent 8 }}
+    spec:
+      containers:
+      - name: postgres
+        image: {{ .Values.postgres.image }}
+        resources:
+          {{- toYaml .Values.postgres.resources | nindent 10 }}
+        env:
+        - name: POSTGRES_USER
+          value: {{ .Values.postgres.env.user | quote }}
+        - name: POSTGRES_PASSWORD
+          value: {{ .Values.postgres.env.password | quote }}
+      - name: dmm
+        image: "{{ .Values.dmm.image.repository }}:{{ .Values.dmm.image.tag }}"
+        imagePullPolicy: {{ .Values.dmm.image.pullPolicy }}
+        resources:
+          {{- toYaml .Values.dmm.resources | nindent 10 }}
+        ports:
+        - containerPort: {{ .Values.dmm.port }}
+        volumeMounts:
+        - name: dmm-config
+          mountPath: {{ .Values.paths.dmmConfig }}
+          subPath: dmm.cfg
+        - name: sense-config
+          mountPath: {{ .Values.paths.senseConfig }}
+          subPath: .sense-o-auth.yaml
+        - name: rucio-client-config
+          mountPath: {{ .Values.paths.rucioConfig }}
+          subPath: rucio.cfg
+        - name: ca-volume
+          mountPath: {{ .Values.paths.caBundle }}
+        - name: certs
+          mountPath: {{ .Values.certs.mountDir }}/key.pem
+          subPath: {{ .Values.certs.keyFile }}
+        - name: certs
+          mountPath: {{ .Values.certs.mountDir }}/cert.pem
+          subPath: {{ .Values.certs.certFile }}
+      nodeSelector:
+        {{- toYaml .Values.nodeSelector | nindent 8 }}
+      volumes:
+      - name: dmm-config
+        secret:
+          secretName: {{ .Values.secrets.dmmConfig }}
+      - name: rucio-client-config
+        secret:
+          secretName: {{ .Values.secrets.rucioClientConfig }}
+      - name: sense-config
+        secret:
+          secretName: {{ .Values.secrets.senseConfig }}
+      - name: certs
+        secret:
+          secretName: {{ .Values.secrets.certs }}
+          items:
+            - key: {{ .Values.certs.certFile }}
+              path: {{ .Values.certs.certFile }}
+            - key: {{ .Values.certs.keyFile }}
+              path: {{ .Values.certs.keyFile }}
+      - name: ca-volume
+        secret:
+          defaultMode: 420
+          secretName: {{ .Values.secrets.caBundle }}
