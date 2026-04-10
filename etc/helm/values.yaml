@@ -56,7 +56,7 @@ service:
 ingress:
   enabled: true
   className: haproxy
-  host: dmm-dev.nrp-nautilus.io
+  host: dmm.nrp-nautilus.io
   tls: true
   path: /
   pathType: Prefix

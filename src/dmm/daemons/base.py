@@ -4,9 +4,9 @@ from time import sleep
 import os
 
 class DaemonBase:
-    def __init__(self, frequency, kwargs={}):
+    def __init__(self, frequency, kwargs=None):
         self.frequency = frequency
-        self.kwargs = kwargs
+        self.kwargs = kwargs or {}
         self.thread = None
         self.running = True
 

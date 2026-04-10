@@ -1,6 +1,6 @@
 import logging
 
-from dmm.models.request import Request
+from dmm.models.request import Request, RequestStatus
 from dmm.db.session import databased
 
 from dmm.daemons.base import DaemonBase
@@ -15,8 +15,8 @@ class FTSModifierDaemon(DaemonBase):
 
     @databased
     def run_once(self, session=None):
-        self._process_requests(session, ["ALLOCATED", "DECIDED", "PROVISIONED"], self._modify_request)
-        self._process_requests(session, ["DELETED"], self._delete_request)
+        self._process_requests(session, [RequestStatus.ALLOCATED, RequestStatus.DECIDED, RequestStatus.PROVISIONED], self._modify_request)
+        self._process_requests(session, [RequestStatus.DELETED], self._delete_request)
 
     def _process_requests(self, session, statuses, action):
         reqs = Request.get_by_status(statuses=statuses, session=session)
@@ -26,12 +26,23 @@ class FTSModifierDaemon(DaemonBase):
 
     def _modify_request(self, req, session):
         if req.fts_streams_current != req.fts_streams_desired:
+            if not req.src_endpoint or not req.dst_endpoint:
+                logging.warning(
+                    f"Skipping FTS update for request {req.rule_id}: missing source or destination endpoint"
+                )
+                return
             logging.debug(f"Modifying FTS limits for request {req.rule_id}, from {req.fts_streams_current} to {req.fts_streams_desired}")
             if modify_fts_config(req.src_endpoint, req.dst_endpoint, req.fts_streams_desired):
                 req.set_fts_streams(current=req.fts_streams_desired, session=session)
 
     def _delete_request(self, req, session):
         if req.fts_streams_current != 0:
+            if not req.src_endpoint or not req.dst_endpoint:
+                logging.warning(
+                    f"Skipping FTS delete for request {req.rule_id}: missing source or destination endpoint"
+                )
+                req.set_fts_streams(current=0, session=session)
+                return
             logging.debug(f"Deleting FTS limits for request {req.rule_id}")
             delete_fts_config(req.src_endpoint, req.dst_endpoint)
             req.set_fts_streams(current=0, session=session)

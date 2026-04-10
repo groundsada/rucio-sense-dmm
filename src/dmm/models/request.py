@@ -1,9 +1,38 @@
 from sqlmodel import Field, Relationship, select
 from typing import Optional, List
+from enum import Enum
 
 import logging
 
 from dmm.models.base import *
+
+class RequestStatus(str, Enum):
+    INIT        = "INIT"        # New rule detected, not yet processed
+    NOT_SENSE   = "NOT_SENSE"   # Rule does not require a SENSE circuit
+    ALLOCATED   = "ALLOCATED"   # IPv6 endpoints assigned, awaiting circuit staging
+    RETRY       = "RETRY"       # Staging failed, will retry up to max_retries
+    FAILED      = "FAILED"      # Permanently failed (retries exhausted or bad config)
+    STAGED      = "STAGED"      # SENSE instance created, UUID known, awaiting decision
+    DECIDED     = "DECIDED"     # Bandwidth decided by optimizer, awaiting provisioning
+    PROVISIONED = "PROVISIONED" # SENSE circuit active at allocated bandwidth
+    STALE       = "STALE"       # Bandwidth needs to change (re-optimization result)
+    MODIFIED    = "MODIFIED"    # Rucio rule priority changed, triggers re-optimization
+    FINISHED_R  = "FINISHED_R"  # Rucio rule done, circuit still live (keep-alive / reuse window)
+    FINISHED    = "FINISHED"    # Circuit throttled to 1G, ready for cancellation
+    CANCELED    = "CANCELED"    # SENSE circuit cancelled, endpoints freed
+    DELETED     = "DELETED"     # SENSE instance deleted, record fully retired
+
+class SenseCircuitStatus(str, Enum):
+    CREATE_COMPILED    = "CREATE - COMPILED"
+    CREATE_READY       = "CREATE - READY"
+    CREATE_COMMITTING  = "CREATE - COMMITTING"
+    CREATE_COMMITTED   = "CREATE - COMMITTED"
+    CREATE_FAILED      = "CREATE - FAILED"
+    MODIFY_READY       = "MODIFY - READY"
+    MODIFY_COMMITTING  = "MODIFY - COMMITTING"
+    MODIFY_COMMITTED   = "MODIFY - COMMITTED"
+    REINSTATE_READY    = "REINSTATE - READY"
+    CANCEL_READY       = "CANCEL - READY"
 
 class Request(ModelBase, table=True):
     rule_id: str = Field(primary_key=True)
@@ -11,21 +40,22 @@ class Request(ModelBase, table=True):
     priority: Optional[int] = Field(default=None)
     rule_size: Optional[float] = Field(default=None)
     modified_priority: Optional[int] = Field(default=None)
-    available_bandwidth_mbps: Optional[float] = Field(default=None)  # Renamed: clarified units
-    allocated_bandwidth_mbps: Optional[float] = Field(default=None)  # Renamed from bandwidth
-    previous_bandwidth_mbps: Optional[float] = Field(default=None)  # Renamed: clarified units
+    available_bandwidth_mbps: Optional[float] = Field(default=None)  
+    allocated_bandwidth_mbps: Optional[float] = Field(default=None)  
+    previous_bandwidth_mbps: Optional[float] = Field(default=None)
     sense_uuid: Optional[str] = Field(default=None)
-    sense_src_uri: Optional[str] = Field(default=None)  # Renamed from source_affiliation_uri
-    sense_dst_uri: Optional[str] = Field(default=None)  # Renamed from destination_affiliation_uri
+    sense_src_uri: Optional[str] = Field(default=None)  
+    sense_dst_uri: Optional[str] = Field(default=None)  
     sense_circuit_status: Optional[str] = Field(default=None, index=True)
     sense_affiliated: Optional[bool] = Field(default=False)
-    fts_streams_current: Optional[int] = Field(default=0)  # Renamed from fts_streams_current
-    fts_streams_desired: Optional[int] = Field(default=None)  # Renamed from fts_streams_desired
+    fts_streams_current: Optional[int] = Field(default=0)
+    fts_streams_desired: Optional[int] = Field(default=None)
     sense_provisioned_at: Optional[datetime] = Field(default=None)
     rucio_finished_at: Optional[datetime] = Field(default=None)
     prometheus_throughput: Optional[float] = Field(default=None)
     prometheus_bytes: Optional[float] = Field(default=None)
     health: Optional[str] = Field(default=None)
+    sense_retries: Optional[int] = Field(default=0)
     
     src_site_: Optional[str] = Field(default=None, foreign_key='site.name')
     dst_site_: Optional[str] = Field(default=None, foreign_key='site.name')
@@ -106,6 +136,11 @@ class Request(ModelBase, table=True):
         logging.debug(f"REQUEST UPDATE: {self.rule_id} -> priority={priority}")
         self.priority = priority
         self.modified_priority = priority
+        self.save(session)
+
+    def increment_sense_retries(self, session=None):
+        self.sense_retries = (self.sense_retries or 0) + 1
+        logging.debug(f"REQUEST UPDATE: {self.rule_id} -> sense_retries={self.sense_retries}")
         self.save(session)
 
     def set_sense_circuit_status(self, status: str, session=None):

@@ -5,7 +5,7 @@ import logging
 from dmm.daemons.base import DaemonBase
 from datetime import datetime
 
-from dmm.models.request import Request
+from dmm.models.request import Request, RequestStatus
 from dmm.db.session import databased
 
 from dmm.core.config import config_get
@@ -22,7 +22,7 @@ class MonitDaemon(DaemonBase):
 
     @databased
     def run_once(self, session=None):
-        reqs = Request.get_by_status(statuses=["PROVISIONED"], session=session)
+        reqs = Request.get_by_status(statuses=[RequestStatus.PROVISIONED], session=session)
         current_timestamp = round(datetime.timestamp(datetime.now()))
 
         for req in reqs:
@@ -71,11 +71,28 @@ class MonitDaemon(DaemonBase):
     def submit_query(self, query_dict) -> dict:
         endpoint = "api/v1/query"
         query_addr = f"{self.prometheus_host}/{endpoint}"
-        return requests.get(query_addr, params=query_dict, auth=(self.prometheus_user, self.prometheus_pass)).json()
+        try:
+            response = requests.get(
+                query_addr,
+                params=query_dict,
+                auth=(self.prometheus_user, self.prometheus_pass),
+                timeout=15,
+            )
+            response.raise_for_status()
+            return response.json()
+        except requests.RequestException as e:
+            logging.error(f"Prometheus query request failed for {query_addr}: {e}", exc_info=True)
+            raise
+        except ValueError as e:
+            logging.error(f"Prometheus query returned invalid JSON for {query_addr}: {e}", exc_info=True)
+            raise
     
     @staticmethod
     def get_val_from_response(response):
-        return response["data"]["result"][0]["value"][1]
+        try:
+            return response["data"]["result"][0]["value"][1]
+        except (KeyError, IndexError, TypeError) as e:
+            raise ValueError(f"Invalid Prometheus response format: {response}") from e
                 
     def get_interfaces(self, ipv6) -> str:
         ipv6_pattern = f"{ipv6[:-3]}[0-9a-fA-F]{{1,4}}"
@@ -83,15 +100,17 @@ class MonitDaemon(DaemonBase):
         response = self.submit_query({"query": query})
 
         interfaces = []
-        if response["status"] == "success":        
-            for metric in response["data"]["result"]:
-                if re.match(ipv6_pattern, metric["metric"]["address"]):
+        if response.get("status") == "success":
+            for metric in response.get("data", {}).get("result", []):
+                metric_data = metric.get("metric", {}) if isinstance(metric, dict) else {}
+                address = metric_data.get("address")
+                if address and re.match(ipv6_pattern, address):
                     interfaces.append(
                         (
-                            metric["metric"]["device"], 
-                            metric["metric"]["instance"], 
-                            metric["metric"]["job"], 
-                            metric["metric"]["sitename"]
+                            metric_data.get("device"),
+                            metric_data.get("instance"),
+                            metric_data.get("job"),
+                            metric_data.get("sitename"),
                         )
                     )
         return interfaces

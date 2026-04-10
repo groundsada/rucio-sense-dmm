@@ -22,7 +22,8 @@ class FTSClient:
                 headers=self.headers,
                 cert=self.cert,
                 verify=self.capath,
-                data=data
+                data=data,
+                timeout=15,
             )
             success = response.status_code in [200, 201]
             if success:
@@ -30,7 +31,7 @@ class FTSClient:
             else:
                 logging.warning(f"FTS config modification returned status {response.status_code}: {response.text}")
             return success
-        except Exception as e:
+        except requests.RequestException as e:
             logging.error(f"Error while modifying FTS config for {endpoint}: {e}", exc_info=True)
             return False
     
@@ -40,13 +41,14 @@ class FTSClient:
                 self.fts_host + endpoint,
                 headers=self.headers,
                 cert=self.cert,
-                verify=self.capath
+                verify=self.capath,
+                timeout=15,
             )
             success = response.status_code in [200, 201, 204]
             if not success:
                 logging.warning(f"FTS deletion returned status {response.status_code}: {response.text}")
             return success
-        except Exception as e:
+        except requests.RequestException as e:
             logging.error(f"Error while deleting FTS config for {endpoint}: {e}", exc_info=True)
             return False
 

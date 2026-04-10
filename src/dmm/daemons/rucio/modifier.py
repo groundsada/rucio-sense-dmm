@@ -1,7 +1,7 @@
 import logging
 
 from dmm.daemons.base import DaemonBase
-from dmm.models.request import Request
+from dmm.models.request import Request, RequestStatus
 from dmm.db.session import databased
 
 from dmm.core.rucio import get_rule_priority
@@ -17,7 +17,7 @@ class RucioModifierDaemon(DaemonBase):
 
     @databased
     def run_once(self, client=None, session=None):
-        reqs = Request.get_by_status(statuses=["ALLOCATED", "STAGED", "DECIDED", "PROVISIONED"], session=session)
+        reqs = Request.get_by_status(statuses=[RequestStatus.ALLOCATED, RequestStatus.STAGED, RequestStatus.DECIDED, RequestStatus.PROVISIONED], session=session)
         if not reqs:
             return
         
@@ -32,4 +32,4 @@ class RucioModifierDaemon(DaemonBase):
     def _update_request_priority(self, req, new_priority, session):
         logging.debug(f"{req.rule_id} priority changed from {req.priority} to {new_priority}")
         req.set_priority(priority=new_priority, session=session)
-        req.set_status(status="MODIFIED", session=session)
+        req.set_status(status=RequestStatus.MODIFIED, session=session)

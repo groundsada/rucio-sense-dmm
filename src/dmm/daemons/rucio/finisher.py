@@ -3,10 +3,11 @@ from datetime import datetime
 
 from dmm.daemons.base import DaemonBase
 
-from dmm.models.request import Request
+from dmm.models.request import Request, RequestStatus
 from dmm.db.session import databased
 
 from dmm.core.rucio import get_rule_status, is_rule_ok, is_rule_stuck
+from dmm.core.sense import modify_link
 
 from rucio.common.exception import RuleNotFound
 
@@ -20,7 +21,7 @@ class RucioFinisherDaemon(DaemonBase):
     
     @databased
     def run_once(self, client=None, session=None):
-        reqs = Request.get_by_status(statuses=["ALLOCATED", "STAGED", "DECIDED", "PROVISIONED"], session=session)
+        reqs = Request.get_by_status(statuses=[RequestStatus.ALLOCATED, RequestStatus.STAGED, RequestStatus.DECIDED, RequestStatus.PROVISIONED], session=session)
         if not reqs:
             return
         
@@ -32,16 +33,16 @@ class RucioFinisherDaemon(DaemonBase):
             status = get_rule_status(client, req.rule_id)
         except RuleNotFound as e:
             logging.error(f"Request {req.rule_id} not found in Rucio (probably because of the reaper), marking as FINISHED in DMM")
-            req.set_status(status="FINISHED", session=session)
+            req.set_status(status=RequestStatus.FINISHED, session=session)
             return
             
         if is_rule_ok(status):
             logging.debug(f"Request {req.rule_id} finished with status {status}")
-            req.set_status(status="FINISHED", session=session)  # Mark request as finished
+            req.set_status(status=RequestStatus.FINISHED_R, session=session)  # Mark request as finished
             req.update({"rucio_finished_at": datetime.now()}, session=session)
             req.set_fts_streams(current=0, session=session)  # Remove FTS limits
         elif is_rule_stuck(status):
             logging.debug(f"Request {req.rule_id} is stuck, marking as FINISHED in DMM so circuit can be taken down")
-            req.set_status(status="FINISHED", session=session)
+            req.set_status(status=RequestStatus.FINISHED_R, session=session)
             req.update({"rucio_finished_at": datetime.now()}, session=session)
             req.set_fts_streams(current=0, session=session)  # Remove FTS
