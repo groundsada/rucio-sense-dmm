@@ -16,39 +16,120 @@
         <a href="/sites">Sites</a>
     </nav>
     <div class="container">
-        <div class="card">
+        <div class="card details-card">
+            {% if data %}
+            {% set transfer_status = data.transfer_status if data.transfer_status else 'UNKNOWN' %}
+            {% set circuit_status = data.sense_circuit_status if data.sense_circuit_status else 'UNKNOWN' %}
+            {% set health_status = data.health if data.health is not none else 'UNKNOWN' %}
+
             <h2>{{ data.rule_id }}</h2>
 
-            <div class="details-row">
-                <span class="details-label">Bandwidth:</span>
-                <span class="details-value">{{ data.allocated_bandwidth_mbps }}</span>
+            <div class="details-grid">
+                <div class="summary-box">
+                    <div class="summary-label">Transfer Status</div>
+                    <div>
+                        <span class="status-badge {% if transfer_status in ['PROVISIONED', 'FINISHED_R', 'FINISHED', 'DELETED'] %}status-good{% elif transfer_status in ['FAILED', 'CANCELED'] %}status-bad{% else %}status-warn{% endif %}">
+                            {{ transfer_status }}
+                        </span>
+                    </div>
+                </div>
+                <div class="summary-box">
+                    <div class="summary-label">SENSE Circuit State</div>
+                    <div>
+                        <span class="status-badge {% if 'READY' in circuit_status %}status-good{% elif 'FAILED' in circuit_status %}status-bad{% else %}status-warn{% endif %}">
+                            {{ circuit_status }}
+                        </span>
+                    </div>
+                </div>
+                <div class="summary-box">
+                    <div class="summary-label">Retry Count</div>
+                    <div class="summary-value">{{ data.sense_retries if data.sense_retries is not none else 0 }}</div>
+                </div>
+                <div class="summary-box">
+                    <div class="summary-label">Health</div>
+                    <div>
+                        <span class="status-badge {% if health_status == '1' %}status-good{% elif health_status == '0' %}status-bad{% else %}status-warn{% endif %}">
+                            {% if health_status == '1' %}HEALTHY{% elif health_status == '0' %}UNHEALTHY{% else %}{{ health_status }}{% endif %}
+                        </span>
+                    </div>
+                </div>
             </div>
-            <div class="details-row">
-                <span class="details-label">Transfer Status:</span>
-                <span class="details-value">{{ data.transfer_status }}</span>
+
+            <div class="details-sections">
+                <div class="details-section">
+                    <h3>Lifecycle</h3>
+                    <div class="details-row"><span class="details-label">Current Phase:</span>
+                        <span class="details-value">
+                            {% if transfer_status in ['INIT', 'ALLOCATED', 'RETRY'] %}
+                                Preparing / Staging
+                            {% elif transfer_status in ['STAGED', 'DECIDED', 'STALE', 'MODIFIED'] %}
+                                Provisioning / Bandwidth Decision
+                            {% elif transfer_status in ['PROVISIONED', 'FINISHED_R', 'FINISHED'] %}
+                                Active / Finalizing
+                            {% elif transfer_status in ['CANCELED', 'DELETED'] %}
+                                Closed
+                            {% elif transfer_status == 'FAILED' %}
+                                Failed
+                            {% else %}
+                                Unknown
+                            {% endif %}
+                        </span>
+                    </div>
+                    <div class="details-row"><span class="details-label">Priority:</span><span class="details-value">{{ data.priority if data.priority is not none else '—' }}</span></div>
+                    <div class="details-row"><span class="details-label">Modified Priority:</span><span class="details-value">{{ data.modified_priority if data.modified_priority is not none else '—' }}</span></div>
+                    <div class="details-row"><span class="details-label">Retries:</span><span class="details-value">{{ data.sense_retries if data.sense_retries is not none else 0 }}</span></div>
+                    <div class="details-row"><span class="details-label">Sense Affiliated:</span><span class="details-value">{{ 'Yes' if data.sense_affiliated else 'No' }}</span></div>
+                </div>
+
+                <div class="details-section">
+                    <h3>Path & Endpoints</h3>
+                    <div class="details-row"><span class="details-label">Source Site:</span><span class="details-value">{{ data.src_site.name if data.src_site else '—' }}</span></div>
+                    <div class="details-row"><span class="details-label">Source Hostname:</span><span class="details-value">{{ data.src_endpoint.hostname if data.src_endpoint else '—' }}</span></div>
+                    <div class="details-row"><span class="details-label">Source IPv6 Range:</span><span class="details-value">{{ data.src_endpoint.ip_range if data.src_endpoint else '—' }}</span></div>
+                    <div class="details-row"><span class="details-label">Destination Site:</span><span class="details-value">{{ data.dst_site.name if data.dst_site else '—' }}</span></div>
+                    <div class="details-row"><span class="details-label">Destination Hostname:</span><span class="details-value">{{ data.dst_endpoint.hostname if data.dst_endpoint else '—' }}</span></div>
+                    <div class="details-row"><span class="details-label">Destination IPv6 Range:</span><span class="details-value">{{ data.dst_endpoint.ip_range if data.dst_endpoint else '—' }}</span></div>
+                </div>
+
+                <div class="details-section">
+                    <h3>SENSE & FTS</h3>
+                    <div class="details-row"><span class="details-label">SENSE UUID:</span><span class="details-value">{{ data.sense_uuid if data.sense_uuid else '—' }}</span></div>
+                    <div class="details-row"><span class="details-label">SENSE Source URI:</span><span class="details-value">{{ data.sense_src_uri if data.sense_src_uri else '—' }}</span></div>
+                    <div class="details-row"><span class="details-label">SENSE Destination URI:</span><span class="details-value">{{ data.sense_dst_uri if data.sense_dst_uri else '—' }}</span></div>
+                    <div class="details-row"><span class="details-label">FTS Streams Current:</span><span class="details-value">{{ data.fts_streams_current if data.fts_streams_current is not none else '—' }}</span></div>
+                    <div class="details-row"><span class="details-label">FTS Streams Desired:</span><span class="details-value">{{ data.fts_streams_desired if data.fts_streams_desired is not none else '—' }}</span></div>
+                </div>
+
+                <div class="details-section">
+                    <h3>Bandwidth & Metrics</h3>
+                    <div class="details-row"><span class="details-label">Rule Size (GB):</span><span class="details-value">{{ (data.rule_size / 1024 / 1024 / 1024) | round(2) if data.rule_size is not none else '—' }}</span></div>
+                    <div class="details-row"><span class="details-label">Allocated Bandwidth (Gbps):</span><span class="details-value">{{ (data.allocated_bandwidth_mbps / 1000) | round(2) if data.allocated_bandwidth_mbps is not none else '—' }}</span></div>
+                    <div class="details-row"><span class="details-label">Available Bandwidth (Gbps):</span><span class="details-value">{{ (data.available_bandwidth_mbps / 1000 / 1000) | round(2) if data.available_bandwidth_mbps is not none else '—' }}</span></div>
+                    <div class="details-row"><span class="details-label">Previous Bandwidth (Gbps):</span><span class="details-value">{{ (data.previous_bandwidth_mbps / 1000) | round(2) if data.previous_bandwidth_mbps is not none else '—' }}</span></div>
+                    <div class="details-row"><span class="details-label">Throughput (Gbps):</span><span class="details-value">{{ data.prometheus_throughput if data.prometheus_throughput is not none else '—' }}</span></div>
+                    <div class="details-row"><span class="details-label">Prometheus Bytes:</span><span class="details-value">{{ data.prometheus_bytes if data.prometheus_bytes is not none else '—' }}</span></div>
+                </div>
+
+                <div class="details-section">
+                    <h3>Timestamps</h3>
+                    <div class="details-row"><span class="details-label">Created:</span><span class="details-value">{{ data.created_at if data.created_at else '—' }}</span></div>
+                    <div class="details-row"><span class="details-label">Updated:</span><span class="details-value">{{ data.updated_at if data.updated_at else '—' }}</span></div>
+                    <div class="details-row"><span class="details-label">SENSE Provisioned At:</span><span class="details-value">{{ data.sense_provisioned_at if data.sense_provisioned_at else '—' }}</span></div>
+                    <div class="details-row"><span class="details-label">Rucio Finished At:</span><span class="details-value">{{ data.rucio_finished_at if data.rucio_finished_at else '—' }}</span></div>
+                </div>
             </div>
-            <div class="details-row">
-                <span class="details-label">Throughput:</span>
-                <span class="details-value">{{ data.prometheus_throughput }}</span>
-            </div>
-            <div class="details-row">
-                <span class="details-label">SENSE UUID:</span>
-                <span class="details-value">{{ data.sense_uuid }}</span>
-            </div>
-            <div class="details-row">
-                <span class="details-label">SENSE Circuit Status:</span>
-                <span class="details-value">{{ data.sense_circuit_status }}</span>
-            </div>
-            <div class="details-row">
-                <span class="details-label">Current FTS Limits:</span>
-                <span class="details-value">{{ data.fts_streams_current }}</span>
-            </div>
-            <div class="details-row">
+
+            <div class="details-row details-actions">
                 <button type="button" onclick="markAsFinished('{{ data.rule_id }}')">Mark as Finished</button>
                 <button type="button" onclick="updateFtsLimit('{{ data.rule_id }}')">Update FTS Limit</button>
                 <button type="button" onclick="reInitializeSense('{{ data.rule_id }}')">Re-Initialize SENSE</button>
                 <button type="button" onclick="reInitializeRequest('{{ data.rule_id }}')">Re-Initialize Request</button>
             </div>
+            {% else %}
+            <h2>Request not found</h2>
+            <p>No details are available for this rule.</p>
+            {% endif %}
+
             <script>
                 function markAsFinished(ruleId) {
                     fetch('/mark_finished', {
@@ -69,12 +150,17 @@
                 function updateFtsLimit(ruleId) {
                     const limit = prompt("Enter new FTS limit:");
                     if (limit !== null) {
+                        const parsedLimit = Number.parseInt(limit, 10);
+                        if (!Number.isInteger(parsedLimit) || parsedLimit < 0) {
+                            alert("FTS limit must be a non-negative integer.");
+                            return;
+                        }
                         fetch('/update_fts_limit', {
                             method: 'POST',
                             headers: {
                                 'Content-Type': 'application/json'
                             },
-                            body: JSON.stringify({ rule_id: ruleId, limit: limit })
+                            body: JSON.stringify({ rule_id: ruleId, limit: parsedLimit })
                         })
                         .then(response => response.text())
                         .then(data => alert(data))

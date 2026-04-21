@@ -39,27 +39,42 @@ class AllocatorDaemon(DaemonBase):
 
     def _reuse_finished_request(self, new_request, session, claimed_rule_ids: set) -> bool:
         # First, prefer reusing a live circuit from a FINISHED_R request
-        reqs_finished_r = Request.get_by_status(statuses=[RequestStatus.FINISHED_R], session=session)
+        reqs_finished_r = Request.get_by_status(statuses=[RequestStatus.FINISHED], session=session)
         for req_fin in reqs_finished_r:
             if req_fin.rule_id in claimed_rule_ids:
                 continue
-            if req_fin.src_site == new_request.src_site and req_fin.dst_site == new_request.dst_site:
+
+            same_direction = (
+                req_fin.src_site == new_request.src_site
+                and req_fin.dst_site == new_request.dst_site
+            )
+            reverse_direction = (
+                req_fin.src_site == new_request.dst_site
+                and req_fin.dst_site == new_request.src_site
+            )
+
+            if same_direction or reverse_direction:
+                reused_src_endpoint = req_fin.src_endpoint if same_direction else req_fin.dst_endpoint
+                reused_dst_endpoint = req_fin.dst_endpoint if same_direction else req_fin.src_endpoint
+                reused_src_uri = req_fin.sense_src_uri if same_direction else req_fin.sense_dst_uri
+                reused_dst_uri = req_fin.sense_dst_uri if same_direction else req_fin.sense_src_uri
+
                 logging.info(
                     f"Request {new_request.rule_id} found a live circuit from FINISHED_R request "
                     f"{req_fin.rule_id} for the same site pair — reusing circuit {req_fin.sense_uuid}."
                 )
                 new_request.update({
-                    "src_endpoint": req_fin.src_endpoint,
-                    "dst_endpoint": req_fin.dst_endpoint,
+                    "src_endpoint": reused_src_endpoint,
+                    "dst_endpoint": reused_dst_endpoint,
                     "sense_uuid": req_fin.sense_uuid,
-                    "sense_src_uri": req_fin.sense_src_uri,
-                    "sense_dst_uri": req_fin.sense_dst_uri,
+                    "sense_src_uri": reused_src_uri,
+                    "sense_dst_uri": reused_dst_uri,
                     "allocated_bandwidth_mbps": req_fin.allocated_bandwidth_mbps,
                     "available_bandwidth_mbps": req_fin.available_bandwidth_mbps,
                     "sense_circuit_status": req_fin.sense_circuit_status,
                     "sense_affiliated": req_fin.sense_affiliated,
                     "transfer_status": RequestStatus.PROVISIONED
-                })
+                }, session=session)
                 req_fin.set_status(status=RequestStatus.DELETED, session=session)
                 claimed_rule_ids.add(req_fin.rule_id)
                 return True
@@ -129,7 +144,7 @@ class AllocatorDaemon(DaemonBase):
                 "src_endpoint": src_endpoint,
                 "dst_endpoint": dst_endpoint,
                 "transfer_status": RequestStatus.ALLOCATED
-            })
+            }, session=session)
             
             # Commit the session to ensure database consistency
             session.commit()

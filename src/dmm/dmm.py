@@ -56,8 +56,8 @@ class DMM:
     def run_server(port):
         try:
             uvicorn.run(api, host="0.0.0.0", port=port)
-        except Exception as e:
-            logging.error(f"Failed to start frontend on {port}, trying default port 31601: {e}", exc_info=True)
+        except BaseException as e:
+            logging.error(f"Failed to start frontend on {port}, trying default port 31601", exc_info=True)
             uvicorn.run(api, host="0.0.0.0", port=31601)
 
     def start(self) -> None:
