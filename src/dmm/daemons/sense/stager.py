@@ -3,7 +3,7 @@ import logging
 from dmm.daemons.base import DaemonBase
 
 from dmm.db.session import databased
-from dmm.models.request import Request
+from dmm.models.request import Request, RequestStatus
 from dmm.models.mesh import Mesh
 
 from dmm.core.config import config_get
@@ -19,7 +19,7 @@ class SENSEStagerDaemon(DaemonBase):
 
     @databased
     def run_once(self, session=None):
-        reqs_allocated = Request.get_by_status(statuses=["ALLOCATED"], session=session)
+        reqs_allocated = Request.get_by_status(statuses=[RequestStatus.ALLOCATED], session=session)
         if reqs_allocated == []:
             return
         for req in reqs_allocated:
@@ -27,7 +27,7 @@ class SENSEStagerDaemon(DaemonBase):
                 vlan_range = Mesh.get_vlan_range(site_1=req.src_site, site_2=req.dst_site, session=session)
                 if vlan_range is None:
                     logging.error(f"No VLAN range found for {req.rule_id}, marking as FAILED")
-                    req.set_status(status="FAILED", session=session)
+                    req.set_status(status=RequestStatus.FAILED, session=session)
                     continue
                     
                 response = stage_link(
@@ -54,7 +54,8 @@ class SENSEStagerDaemon(DaemonBase):
                 req.set_sense_uuid(sense_uuid, session=session)
                 req.set_sense_uris(src_uri, dst_uri, session=session)
                 req.set_available_bandwidth(bandwidth_mbps, session=session)
-                req.set_status(status="STAGED", session=session)
+                req.set_status(status=RequestStatus.STAGED, session=session)
                 
             except Exception as e:
                 logging.error(f"Failed to stage link for {req.rule_id}, {e}, will try again")
+                req.set_status(status=RequestStatus.RETRY, session=session)

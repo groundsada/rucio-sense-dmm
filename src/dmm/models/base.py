@@ -19,16 +19,22 @@ class ModelBase(SQLModel):
         return getattr(self, key)
     
     def save(self, session=None):
+        if session is None:
+            raise ValueError("Session is required to save model instances")
         self.updated_at = datetime.now(timezone.utc)
         session.add(self)
-        session.commit()
 
     def delete(self, session=None):
+        if session is None:
+            raise ValueError("Session is required to delete model instances")
         session.delete(self)
 
     def update(self, values, session=None):
+        if session is None:
+            raise ValueError("Session is required to update model instances")
         for k, v in values.items():
             self[k] = v
+        session.add(self)
 
     @classmethod
     def get_all(cls, session=None):

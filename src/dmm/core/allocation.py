@@ -47,8 +47,11 @@ def allocate_address(sitename, alloc_name):
         # Try to free the address if allocation failed partially
         try:
             address_api.free_address(pool_name, name=alloc_name)
-        except:
-            pass
+        except Exception as cleanup_err:
+            logging.error(
+                f"allocate_address cleanup failed for pool={pool_name}, alloc_name={alloc_name}: {cleanup_err}",
+                exc_info=True,
+            )
         raise
 
 def free_address(sitename, alloc_name):

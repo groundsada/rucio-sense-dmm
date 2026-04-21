@@ -16,11 +16,28 @@ class PrometheusUtils:
     def submit_query(self, query_dict) -> dict:
         endpoint = "api/v1/query"
         query_addr = f"{self.prometheus_host}/{endpoint}"
-        return requests.get(query_addr, params=query_dict, auth=(self.prometheus_user, self.prometheus_pass)).json()
+        try:
+            response = requests.get(
+                query_addr,
+                params=query_dict,
+                auth=(self.prometheus_user, self.prometheus_pass),
+                timeout=15,
+            )
+            response.raise_for_status()
+            return response.json()
+        except requests.RequestException as e:
+            logging.error(f"Prometheus query request failed for {query_addr}: {e}", exc_info=True)
+            raise
+        except ValueError as e:
+            logging.error(f"Prometheus query returned invalid JSON for {query_addr}: {e}", exc_info=True)
+            raise
     
     @staticmethod
     def get_val_from_response(response):
-        return response["data"]["result"][0]["value"][1]
+        try:
+            return response["data"]["result"][0]["value"][1]
+        except (KeyError, IndexError, TypeError) as e:
+            raise ValueError(f"Invalid Prometheus response format: {response}") from e
                 
     def get_interfaces(self, ipv6) -> str:
         """
@@ -35,15 +52,17 @@ class PrometheusUtils:
         
         #If response is a successful transfer and matches the given ipv6,
         #adds its interface data to the list
-        if response["status"] == "success":        
-            for metric in response["data"]["result"]:
-                if re.match(ipv6_pattern, metric["metric"]["address"]):
+        if response.get("status") == "success":
+            for metric in response.get("data", {}).get("result", []):
+                metric_data = metric.get("metric", {}) if isinstance(metric, dict) else {}
+                address = metric_data.get("address")
+                if address and re.match(ipv6_pattern, address):
                     interfaces.append(
                         (
-                            metric["metric"]["device"], 
-                            metric["metric"]["instance"], 
-                            metric["metric"]["job"], 
-                            metric["metric"]["sitename"]
+                            metric_data.get("device"),
+                            metric_data.get("instance"),
+                            metric_data.get("job"),
+                            metric_data.get("sitename"),
                         )
                     )
         return interfaces
@@ -61,10 +80,10 @@ class PrometheusUtils:
             metric = f"node_network_transmit_bytes_total{{{query_params}}}"
 
             response = self.submit_query({"query": metric, "time": time})
-            if response["status"] == "success":
+            if response.get("status") == "success" and response.get("data", {}).get("result"):
                 bytes_at_t = self.get_val_from_response(response)
             else:
-                raise Exception(f"query {metric} failed")
+                raise ValueError(f"query {metric} failed or returned empty result")
             total_bytes += float(bytes_at_t)
         return total_bytes
 
@@ -79,7 +98,9 @@ class FTSMonitUtils:
     def get_val_from_response(response):
         return response["hits"]["hits"][0]["_source"]["data"]
 
-    def submit_job_query(self, rule_id, query_params=[]) -> list:
+    def submit_job_query(self, rule_id, query_params=None) -> list:
+        if query_params is None:
+            query_params = []
         endpoint = "api/datasources/proxy/9233/monit_prod_fts_enr_complete*/_search"
         query_addr = f"{self.fts_host}/{endpoint}"
         data = {
@@ -97,6 +118,16 @@ class FTSMonitUtils:
             "_source": query_params
         }
         data_string = json.dumps(data)
-        response = requests.get(query_addr, data=data_string, headers=self.headers).json()
-        timestamps = [hit["_source"]["data"] for hit in response["hits"]["hits"]]
+        try:
+            response_obj = requests.get(query_addr, data=data_string, headers=self.headers, timeout=15)
+            response_obj.raise_for_status()
+            response = response_obj.json()
+        except requests.RequestException as e:
+            logging.error(f"FTS Monit request failed for rule {rule_id}: {e}", exc_info=True)
+            raise
+        except ValueError as e:
+            logging.error(f"FTS Monit returned invalid JSON for rule {rule_id}: {e}", exc_info=True)
+            raise
+        hits = response.get("hits", {}).get("hits", [])
+        timestamps = [hit.get("_source", {}).get("data") for hit in hits if hit.get("_source", {}).get("data") is not None]
         return timestamps

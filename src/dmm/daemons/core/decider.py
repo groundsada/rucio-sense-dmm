@@ -6,7 +6,7 @@ from math import floor
 
 from dmm.daemons.base import DaemonBase
 
-from dmm.models.request import Request
+from dmm.models.request import Request, RequestStatus
 from dmm.models.mesh import Mesh
 from dmm.db.session import databased
 
@@ -39,7 +39,7 @@ class DeciderDaemon(DaemonBase):
         The max available bandwidth is gotten from the Mesh table.
         """
         multi_graph = nx.MultiGraph()
-        reqs = Request.get_by_status(statuses=["MODIFIED", "DECIDED", "STALE", "STAGED", "PROVISIONED", "FINISHED"], session=session) # get all requests which would affect the decision (i.e. don't consider requests that are in CANCELLED or FAILED state)
+        reqs = Request.get_by_status(statuses=[RequestStatus.MODIFIED, RequestStatus.DECIDED, RequestStatus.STALE, RequestStatus.STAGED, RequestStatus.PROVISIONED, RequestStatus.FINISHED], session=session) # get all requests which would affect the decision (i.e. don't consider requests that are in CANCELLED or FAILED state)
         if reqs == []:
             return multi_graph
         for req in reqs:
@@ -151,7 +151,7 @@ class DeciderDaemon(DaemonBase):
         """
         Allocate bandwidth for new requests and mark them as decided
         """
-        reqs_allocated = Request.get_by_status(statuses=["STAGED"], session=session)
+        reqs_allocated = Request.get_by_status(statuses=[RequestStatus.STAGED], session=session)
         for req in reqs_allocated:
             allocated_bandwidth = None  # Initialize to prevent NameError
             for _, _, key, data in multi_graph.edges(keys=True, data=True):
@@ -165,13 +165,13 @@ class DeciderDaemon(DaemonBase):
                 
             req.set_allocated_bandwidth(allocated_bandwidth, session=session)
             logging.info(f"Allocated bandwidth for request {req.rule_id}: {allocated_bandwidth}")
-            req.set_status(status="DECIDED", session=session)
+            req.set_status(status=RequestStatus.DECIDED, session=session)
 
     def _modify_existing_bandwidth(self, multi_graph, session) -> None:
         """
         Modify the bandwidth for existing requests and mark them as stale
         """
-        reqs_provisioned = Request.get_by_status(statuses=["MODIFIED", "PROVISIONED"], session=session)
+        reqs_provisioned = Request.get_by_status(statuses=[RequestStatus.MODIFIED, RequestStatus.PROVISIONED], session=session)
         for req in reqs_provisioned:
             allocated_bandwidth = None  # Initialize to prevent NameError
             for _, _, key, data in multi_graph.edges(keys=True, data=True):
@@ -187,7 +187,7 @@ class DeciderDaemon(DaemonBase):
                 req.set_previous_bandwidth(req.allocated_bandwidth_mbps, session=session)
                 req.set_allocated_bandwidth(allocated_bandwidth, session=session)
                 logging.info(f"Modified bandwidth for request {req.rule_id}: {allocated_bandwidth}")
-                req.set_status(status="STALE", session=session)
+                req.set_status(status=RequestStatus.STALE, session=session)
 
     @staticmethod
     def _good_response(response):

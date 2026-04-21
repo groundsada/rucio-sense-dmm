@@ -3,7 +3,7 @@ import logging
 from dmm.daemons.base import DaemonBase
 from dmm.db.session import databased
 
-from dmm.models.request import Request
+from dmm.models.request import Request, RequestStatus
 from dmm.models.mesh import Mesh
 
 from dmm.core.config import config_get
@@ -11,7 +11,8 @@ from dmm.core.sense import (
     provision_link, 
     is_create_ready, 
     is_create_compiled,
-    is_being_provisioned
+    is_being_provisioned,
+    is_create_failed,
 )
 
 class SENSEProvisionerDaemon(DaemonBase):
@@ -25,18 +26,18 @@ class SENSEProvisionerDaemon(DaemonBase):
     @databased
     def run_once(self, session=None):
         # make sure there are no stale requests before provisioning any new ones
-        reqs_stale = Request.get_by_status(statuses=["STALE"], session=session)
+        reqs_stale = Request.get_by_status(statuses=[RequestStatus.STALE], session=session)
         if reqs_stale != []:
             logging.debug("Stale requests exist, skipping provisioning")
             return
             
-        reqs_decided = Request.get_by_status(statuses=["DECIDED"], session=session)
+        reqs_decided = Request.get_by_status(statuses=[RequestStatus.DECIDED], session=session)
         if reqs_decided == []:
             return
             
         # Check which specific requests have provisioning in progress
         # Build a set of rule_ids that are currently being provisioned
-        all_reqs = Request.get_by_status(statuses=["DECIDED", "PROVISIONED"], session=session)
+        all_reqs = Request.get_by_status(statuses=[RequestStatus.DECIDED, RequestStatus.PROVISIONED], session=session)
         provisioning_rule_ids = set()
         for req_ in all_reqs:
             if is_being_provisioned(req_.sense_circuit_status):
@@ -60,7 +61,15 @@ class SENSEProvisionerDaemon(DaemonBase):
                 status = req.sense_circuit_status
                 if is_create_ready(status):
                     logging.debug(f"Request {req.sense_uuid} already in ready status, marking as provisioned")
-                    req.set_status(status="PROVISIONED", session=session)
+                    req.set_status(status=RequestStatus.PROVISIONED, session=session)
+                    continue
+
+                if is_create_failed(status):
+                    logging.warning(
+                        f"Request {req.rule_id} is in {status} for SENSE instance {req.sense_uuid}; "
+                        "marking as RETRY"
+                    )
+                    req.set_status(status=RequestStatus.RETRY, session=session)
                     continue
                     
                 if not is_create_compiled(status):
@@ -83,8 +92,9 @@ class SENSEProvisionerDaemon(DaemonBase):
                     vlan_range=vlan_range,
                     rule_id=req.rule_id
                 )
-                req.set_status(status="PROVISIONED", session=session)
+                req.set_status(status=RequestStatus.PROVISIONED, session=session)
                 logging.info(f"Successfully provisioned request {req.rule_id}")
                 
             except Exception as e:
                 logging.error(f"Failed to provision link for {req.rule_id}: {e}", exc_info=True)
+                req.set_status(status=RequestStatus.RETRY, session=session)

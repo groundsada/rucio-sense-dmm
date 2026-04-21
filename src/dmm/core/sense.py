@@ -13,7 +13,13 @@ from sense.client.address_api import AddressApi
 
 def _good_response(response):
     """Check if SENSE API response is valid (no errors)."""
-    return bool(response and not any("error" in str(r).lower() for r in response))
+    if not response:
+        return False
+    if isinstance(response, dict):
+        error_val = response.get("error")
+        if error_val:
+            return False
+    return not any("error" in str(r).lower() for r in response)
 
 def format_ipv6(ip):
     """Format IPv6 address for SENSE API compatibility."""
@@ -59,6 +65,7 @@ def stage_link(profile_uuid, src_site, dst_site, src_ip_range, dst_ip_range, vla
     Raises:
         ValueError: If staging fails
     """
+    workflow_api = None
     try:
         workflow_api = WorkflowCombinedApi()
         workflow_api.instance_new()
@@ -99,12 +106,16 @@ def stage_link(profile_uuid, src_site, dst_site, src_ip_range, dst_ip_range, vla
         }
         response = workflow_api.instance_create(json.dumps(intent))
         if not _good_response(response):
-            workflow_api.instance_delete(si_uuid=response["service_uuid"])
             raise ValueError(f"SENSE req staging failed for {rule_id}")
         return response
     except Exception as e:
         logging.error(f"Failed to stage link for {rule_id}: {e}")
-        raise
+        if workflow_api and getattr(workflow_api, "si_uuid", None):
+            try:
+                workflow_api.instance_delete(si_uuid=workflow_api.si_uuid)  # Clean up any created instance
+            except Exception as cleanup_err:
+                logging.error(f"Failed to clean up partially created SENSE instance for {rule_id}: {cleanup_err}")
+        raise ValueError(f"Failed to stage link for {rule_id}") from e
 
 def parse_staging_response(response):
     """
@@ -116,10 +127,32 @@ def parse_staging_response(response):
     Returns:
         Tuple of (sense_uuid, bandwidth_mbps, src_uri, dst_uri)
     """
+    if not isinstance(response, dict):
+        raise ValueError(f"Invalid staging response type: {type(response)}")
+
     sense_uuid = response.get("service_uuid")
-    bandwidth_mbps = int(response.get("queries", [{}])[1].get("results", [{}])[0].get("bandwidth", 0))
-    src_uri = response.get("queries")[2].get("results")[0].get("ipv6_subnet_uri")
-    dst_uri = response.get("queries")[2].get("results")[1].get("ipv6_subnet_uri")
+    queries = response.get("queries")
+    if not sense_uuid:
+        raise ValueError("Missing service_uuid in staging response")
+    if not isinstance(queries, list) or len(queries) < 3:
+        raise ValueError("Staging response has incomplete queries payload")
+
+    bw_query = queries[1] if isinstance(queries[1], dict) else {}
+    bw_results = bw_query.get("results", [])
+    if not bw_results:
+        raise ValueError("Missing bandwidth results in staging response")
+    bandwidth_mbps = int((bw_results[0] or {}).get("bandwidth", 0))
+
+    extract_query = queries[2] if isinstance(queries[2], dict) else {}
+    extract_results = extract_query.get("results", [])
+    if len(extract_results) < 2:
+        raise ValueError("Missing endpoint extraction results in staging response")
+
+    src_uri = (extract_results[0] or {}).get("ipv6_subnet_uri")
+    dst_uri = (extract_results[1] or {}).get("ipv6_subnet_uri")
+    if not src_uri or not dst_uri:
+        raise ValueError("Missing source or destination IPv6 subnet URI in staging response")
+
     return sense_uuid, bandwidth_mbps, src_uri, dst_uri
 
 def provision_link(sense_uuid, profile_uuid, bandwidth_mbps, src_site, dst_site, 
@@ -254,44 +287,64 @@ def delete_instance(sense_uuid):
     response = workflow_api.instance_delete(si_uuid=sense_uuid)
     return response
 
+from dmm.models.request import SenseCircuitStatus
+
 def is_cancel_ready(status):
     """Check if instance is in CANCEL-READY state."""
-    return status and re.match(r"(CANCEL) - READY$", status)
-
+    return status == SenseCircuitStatus.CANCEL_READY.value
 
 def is_create_compiled(status):
     """Check if instance is in CREATE-COMPILED state."""
-    return status and re.match(r"(CREATE) - COMPILED$", status)
-
+    return status == SenseCircuitStatus.CREATE_COMPILED.value
 
 def is_ready_for_cancel(status):
     """Check if instance is in a state that can be cancelled."""
-    return status and re.match(r"(CREATE|MODIFY|REINSTATE) - READY$", status)
-
+    return status in {
+        SenseCircuitStatus.CREATE_READY.value,
+        SenseCircuitStatus.MODIFY_READY.value,
+        SenseCircuitStatus.REINSTATE_READY.value
+    }
 
 def is_create_ready(status):
     """Check if instance is in CREATE-READY state."""
-    return status and re.match(r"(CREATE) - READY$", status)
+    return status == SenseCircuitStatus.CREATE_READY.value
 
+def is_create_failed(status):
+    """Check if instance creation has failed."""
+    return status == SenseCircuitStatus.CREATE_FAILED.value
 
 def is_ready_for_modify(status):
     """Check if instance is in a state that can be modified."""
-    return status and re.match(r"(CREATE|MODIFY|REINSTATE) - READY$", status)
-
+    return status in {
+        SenseCircuitStatus.CREATE_READY.value,
+        SenseCircuitStatus.MODIFY_READY.value,
+        SenseCircuitStatus.REINSTATE_READY.value
+    }
 
 def is_being_modified(status):
     """Check if instance is currently being modified."""
-    return status and re.match(r"(MODIFY) - (COMMITTING|COMMITTED)", status)
-
+    return status in {
+        SenseCircuitStatus.MODIFY_COMMITTING.value,
+        SenseCircuitStatus.MODIFY_COMMITTED.value
+    }
 
 def is_being_provisioned(status):
     """Check if instance is currently being provisioned."""
-    return status and re.match(r"(CREATE|MODIFY) - (COMMITTING|COMMITTED)", status)
-
+    return status in {
+        SenseCircuitStatus.CREATE_COMMITTING.value,
+        SenseCircuitStatus.CREATE_COMMITTED.value,
+        SenseCircuitStatus.MODIFY_COMMITTING.value,
+        SenseCircuitStatus.MODIFY_COMMITTED.value
+    }
 
 def is_affiliated_state(status):
     """Check if instance is in a state where endpoints should be affiliated."""
-    return status and re.match(r"(CREATE) - (COMPILED|COMMITTED|COMMITTING|READY)$", status)
+    return status in {
+        SenseCircuitStatus.CREATE_COMPILED.value,
+        SenseCircuitStatus.CREATE_COMMITTED.value,
+        SenseCircuitStatus.CREATE_COMMITTING.value,
+        SenseCircuitStatus.CREATE_READY.value
+    }
 
 def affiliate_endpoints(sense_uuid, src_site_name, dst_site_name, src_ip_range, dst_ip_range, 
                         sense_src_uri, sense_dst_uri):

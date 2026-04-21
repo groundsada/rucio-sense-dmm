@@ -1,0 +1,62 @@
+replicaCount: 1
+
+nodeSelector:
+  kubernetes.io/hostname: "ucsd-nrp.cern.ch"
+
+postgres:
+  image: postgres
+  resources:
+    requests:
+      memory: "1Gi"
+      cpu: "1"
+    limits:
+      memory: "4Gi"
+      cpu: "4"
+  env:
+    user: "dmm"
+    password: "dmm"
+
+dmm:
+  image:
+    repository: aaarora/dmm
+    tag: latest
+    pullPolicy: Always
+  resources:
+    requests:
+      memory: "4Gi"
+      cpu: "4"
+    limits:
+      memory: "4Gi"
+      cpu: "4"
+  port: 80
+
+secrets:
+  dmmConfig: dmm-config
+  rucioClientConfig: rucio-client-config
+  senseConfig: sense-config
+  certs: dmm-certs
+  caBundle: rucio-server-rucio-ca-bundle
+
+certs:
+  certFile: hostcert.pem
+  keyFile: hostcert.key.pem
+  mountDir: /opt/certs
+
+paths:
+  dmmConfig: /opt/dmm/dmm.cfg
+  senseConfig: /root/.sense-o-auth.yaml
+  rucioConfig: /opt/rucio/etc/rucio.cfg
+  caBundle: /etc/grid-security/certificates/
+
+service:
+  type: ClusterIP
+  port: 8080
+  targetPort: 80
+
+ingress:
+  enabled: true
+  className: haproxy
+  host: dmm.nrp-nautilus.io
+  tls: true
+  path: /
+  pathType: Prefix

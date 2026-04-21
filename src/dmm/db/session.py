@@ -33,7 +33,8 @@ def get_engine():
             )
         else:
             raise ValueError(f"Unknown database type: {db_type}, supported types are 'postgresql' and 'sqlite'")
-    assert _ENGINE
+    if _ENGINE is None:
+        raise RuntimeError("Database engine initialization failed")
     return _ENGINE
 
 def get_session():
@@ -47,8 +48,9 @@ def databased(function):
             if not kwargs.get('session'):
                 with get_session() as session:
                     try:
-                        kwargs['session'] = session
-                        result = await function(*args, **kwargs)
+                        call_kwargs = kwargs.copy()
+                        call_kwargs['session'] = session
+                        result = await function(*args, **call_kwargs)
                         session.commit()
                     except Exception as e:
                         session.rollback()
@@ -63,8 +65,9 @@ def databased(function):
             if not kwargs.get('session'):
                 with get_session() as session:
                     try:
-                        kwargs['session'] = session
-                        result = function(*args, **kwargs)
+                        call_kwargs = kwargs.copy()
+                        call_kwargs['session'] = session
+                        result = function(*args, **call_kwargs)
                         session.commit()
                     except Exception as e:
                         session.rollback()

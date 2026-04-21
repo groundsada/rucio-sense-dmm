@@ -1,7 +1,7 @@
 import logging
 
 from dmm.daemons.base import DaemonBase
-from dmm.models.request import Request
+from dmm.models.request import Request, RequestStatus
 from dmm.models.site import Site
 from dmm.db.session import databased
 
@@ -92,10 +92,10 @@ class RucioInitDaemon(DaemonBase):
 
         if is_sense_rule(rule):
             logging.debug(f"Rule {rule_info['rule_id']} identified as a SENSE rule.")
-            transfer_status = "INIT"
+            transfer_status = RequestStatus.INIT
         else:
             logging.debug(f"Rule {rule_info['rule_id']} is not a SENSE rule; setting status to 'NOT_SENSE'.")
-            transfer_status = "NOT_SENSE"
+            transfer_status = RequestStatus.NOT_SENSE
 
         rule_size = get_rule_size(client, rule_info['scope'], rule_info['name'])
 

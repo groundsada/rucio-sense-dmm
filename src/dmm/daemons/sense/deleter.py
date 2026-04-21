@@ -3,7 +3,7 @@ import logging
 from dmm.daemons.base import DaemonBase
 
 from dmm.db.session import databased
-from dmm.models.request import Request
+from dmm.models.request import Request, RequestStatus
 
 from dmm.core.sense import delete_instance, is_cancel_ready
 
@@ -16,14 +16,14 @@ class SENSEDeleterDaemon(DaemonBase):
 
     @databased
     def run_once(self, session=None):
-        reqs_cancelled = Request.get_by_status(statuses=["CANCELED"], session=session)
+        reqs_cancelled = Request.get_by_status(statuses=[RequestStatus.CANCELED], session=session)
         if reqs_cancelled == []:
             return
             
         for req in reqs_cancelled:
             if req.sense_uuid is None:
                 logging.debug(f"Request {req.rule_id} has no SENSE UUID, marking as DELETED")
-                req.set_status(status="DELETED", session=session)
+                req.set_status(status=RequestStatus.DELETED, session=session)
                 continue
                 
             try:
@@ -35,7 +35,7 @@ class SENSEDeleterDaemon(DaemonBase):
                     
                 logging.info(f"Deleting SENSE instance {req.sense_uuid} for request {req.rule_id}")
                 delete_instance(req.sense_uuid)
-                req.set_status(status="DELETED", session=session)
+                req.set_status(status=RequestStatus.DELETED, session=session)
                 logging.info(f"Successfully deleted SENSE instance for request {req.rule_id}")
                 
             except Exception as e:

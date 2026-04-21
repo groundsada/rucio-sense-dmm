@@ -1,4 +1,14 @@
 def schedule_rules(rules, bandwidth, reservations):
+    # check base case (everything fits before the first reservation)
+    total_size = sum(size for size, priority in rules)
+    total_priority = sum(priority for size, priority in rules)
+    if reservations:
+        first_res_start = min(start for start, end, res_bw in reservations)
+        if total_size / bandwidth <= first_res_start:
+            return [(idx, 0, size / (priority / total_priority * bandwidth), priority / total_priority * bandwidth) for idx, (size, priority) in enumerate(rules)]
+        else:
+            print("Base case does not hold, proceeding with scheduling")
+
     sorted_rules = sorted(enumerate(rules), key=lambda x: (-x[1][1], x[1][0]))
     
     results = []
