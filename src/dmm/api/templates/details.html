@@ -104,7 +104,7 @@
                     <h3>Bandwidth & Metrics</h3>
                     <div class="details-row"><span class="details-label">Rule Size (GB):</span><span class="details-value">{{ (data.rule_size / 1024 / 1024 / 1024) | round(2) if data.rule_size is not none else '—' }}</span></div>
                     <div class="details-row"><span class="details-label">Allocated Bandwidth (Gbps):</span><span class="details-value">{{ (data.allocated_bandwidth_mbps / 1000) | round(2) if data.allocated_bandwidth_mbps is not none else '—' }}</span></div>
-                    <div class="details-row"><span class="details-label">Available Bandwidth (Gbps):</span><span class="details-value">{{ (data.available_bandwidth_mbps / 1000 / 1000) | round(2) if data.available_bandwidth_mbps is not none else '—' }}</span></div>
+                    <div class="details-row"><span class="details-label">Available Bandwidth (Gbps):</span><span class="details-value">{{ (data.available_bandwidth_mbps / 1000) | round(2) if data.available_bandwidth_mbps is not none else '—' }}</span></div>
                     <div class="details-row"><span class="details-label">Previous Bandwidth (Gbps):</span><span class="details-value">{{ (data.previous_bandwidth_mbps / 1000) | round(2) if data.previous_bandwidth_mbps is not none else '—' }}</span></div>
                     <div class="details-row"><span class="details-label">Throughput (Gbps):</span><span class="details-value">{{ data.prometheus_throughput if data.prometheus_throughput is not none else '—' }}</span></div>
                     <div class="details-row"><span class="details-label">Prometheus Bytes:</span><span class="details-value">{{ data.prometheus_bytes if data.prometheus_bytes is not none else '—' }}</span></div>
