@@ -141,7 +141,7 @@ def parse_staging_response(response):
     bw_results = bw_query.get("results", [])
     if not bw_results:
         raise ValueError("Missing bandwidth results in staging response")
-    bandwidth_mbps = int((bw_results[0] or {}).get("bandwidth", 0))
+    bandwidth_mbps = int((bw_results[0] or {}).get("bandwidth", 0)) / (1000 * 1000)  # Convert from bps to Mbps
 
     extract_query = queries[2] if isinstance(queries[2], dict) else {}
     extract_results = extract_query.get("results", [])
