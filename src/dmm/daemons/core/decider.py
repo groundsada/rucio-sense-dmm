@@ -47,7 +47,13 @@ class DeciderDaemon(DaemonBase):
             multi_graph.add_node(req.src_site.name, link_capacity_mbps=src_link_capacity_mbps)
             dst_link_capacity_mbps = Mesh.get_link_capacity(req.dst_site, session=session)
             multi_graph.add_node(req.dst_site.name, link_capacity_mbps=dst_link_capacity_mbps)
-            multi_graph.add_edge(req.src_site.name, req.dst_site.name, rule_id=req.rule_id, priority=req.priority, bandwidth=req.allocated_bandwidth_mbps, available_bandwidth=req.available_bandwidth_mbps)
+            multi_graph.add_edge(
+                req.src_site.name, req.dst_site.name,
+                rule_id=req.rule_id,
+                priority=req.priority or 0,  # guard against None priority
+                bandwidth=req.allocated_bandwidth_mbps,
+                available_bandwidth=req.available_bandwidth_mbps,
+            )
         return multi_graph
 
     def _simplify_graph(self, multi_graph) -> tuple:
@@ -61,8 +67,12 @@ class DeciderDaemon(DaemonBase):
             priority = data['priority']
             available_bandwidth = data.get('available_bandwidth', 1000)
             if simple_graph.has_edge(u, v):
-                simple_graph[u][v]['priority'] += priority # sum priorities of reqs with the same src and dst
-                simple_graph[u][v]['available_bandwidth'] += available_bandwidth # sum available bandwidths of reqs with the same src and dst
+                simple_graph[u][v]['priority'] += priority
+                # The physical link capacity is fixed — take the max (not sum) so we
+                # don't artificially inflate the upper-bound constraint in the LP.
+                simple_graph[u][v]['available_bandwidth'] = max(
+                    simple_graph[u][v]['available_bandwidth'], available_bandwidth
+                )
             else:
                 simple_graph.add_edge(u, v, priority=priority, available_bandwidth=available_bandwidth)
         
@@ -93,35 +103,34 @@ class DeciderDaemon(DaemonBase):
     def _optimize_bandwidth(self, A, b, c, edges) -> object:
         """
         Optimize the bandwidth allocation using linear programming.
-        Iteratively increases the lower bound to find the maximum feasible minimum bandwidth.
+        Binary-searches over the minimum per-edge lower bound to find the highest
+        feasible floor — O(log(capacity/precision)) LP solves instead of O(capacity/precision).
         """
-        optim_result = None
-        lower_bound = 0
-        max_iterations = 1000  # Prevent infinite loops
-        iterations = 0
-        
-        while iterations < max_iterations:
-            # Keep trying until the optimization fails (i.e. the lower bound is too high)
-            # We can show that the ideal case is when the lower bound is the maximum possible value
-            bounds = [(lower_bound, None) for _ in range(len(edges))]
-            curr_optim_result = linprog(c, A_ub=A, b_ub=b, bounds=bounds, method='highs')
-            
-            if not curr_optim_result.success:
-                break
-            else:
-                optim_result = curr_optim_result
-                lower_bound += 5  # Increment in Mbps
-            iterations += 1
-        
-        # Check if we hit max iterations without finding the limit
-        if iterations >= max_iterations and optim_result is not None:
-            logging.warning(f"Optimization reached max_iterations ({max_iterations}) with lower_bound={lower_bound - 5}. "
-                          "This may indicate an unbounded solution or need for higher max_iterations.")
-            
-        if optim_result is None:
+        n_edges = len(edges)
+        precision_mbps = 5
+
+        # Verify a solution exists with lower_bound=0 before searching.
+        base_bounds = [(0, None)] * n_edges
+        base_result = linprog(c, A_ub=A, b_ub=b, bounds=base_bounds, method='highs')
+        if not base_result.success:
             raise ValueError("No feasible solution found for the optimization problem.")
-        if not optim_result.success:
-            raise ValueError("Optimization failed.")
+
+        optim_result = base_result
+
+        # The highest any single edge can be floored is the minimum capacity constraint.
+        lo = 0
+        hi = int(np.min(b))
+
+        while hi - lo > precision_mbps:
+            mid = (lo + hi) / 2
+            bounds = [(mid, None)] * n_edges
+            result = linprog(c, A_ub=A, b_ub=b, bounds=bounds, method='highs')
+            if result.success:
+                lo = mid
+                optim_result = result
+            else:
+                hi = mid
+
         return optim_result.x
 
     def _allocate_bandwidth(self, multi_graph, simple_graph, edges, edge_index, bandwidths) -> None:

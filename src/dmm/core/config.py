@@ -1,8 +1,10 @@
 import configparser as ConfigParser
 import os
 import logging
+import threading
 
 __CONFIG = None
+__CONFIG_LOCK = threading.Lock()
 
 class Config:
     def __init__(self) -> None:
@@ -33,7 +35,9 @@ def get_config() -> ConfigParser.ConfigParser:
     """
     global __CONFIG
     if __CONFIG is None:
-        __CONFIG = Config()
+        with __CONFIG_LOCK:
+            if __CONFIG is None:  # double-checked locking
+                __CONFIG = Config()
     return __CONFIG.parser
 
 def config_get(section, option, default=None, extract_function=ConfigParser.ConfigParser.get) -> str:

@@ -21,7 +21,13 @@ class RucioFinisherDaemon(DaemonBase):
     
     @databased
     def run_once(self, client=None, session=None):
-        reqs = Request.get_by_status(statuses=[RequestStatus.ALLOCATED, RequestStatus.STAGED, RequestStatus.DECIDED, RequestStatus.PROVISIONED], session=session)
+        reqs = Request.get_by_status(
+            statuses=[
+                RequestStatus.ALLOCATED, RequestStatus.STAGED, RequestStatus.DECIDED,
+                RequestStatus.PROVISIONED, RequestStatus.STALE, RequestStatus.MODIFIED,
+            ],
+            session=session,
+        )
         if not reqs:
             return
         

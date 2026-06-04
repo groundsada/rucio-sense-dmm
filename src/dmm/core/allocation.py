@@ -18,7 +18,12 @@ from dmm.core.rucio import list_rses, get_rse_protocol
 from dmm.core.config import config_get
 
 def _good_response(response):
-    return bool(response and not any("ERROR" in str(r) for r in response))
+    if not response:
+        return False
+    if isinstance(response, dict):
+        if response.get("error"):
+            return False
+    return not any("error" in str(r).lower() for r in response)
 
 def allocate_address(sitename, alloc_name):
     """

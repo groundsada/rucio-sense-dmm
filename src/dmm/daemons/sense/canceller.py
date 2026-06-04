@@ -51,16 +51,19 @@ class SENSECancellerDaemon(DaemonBase):
                     req.set_status(status=RequestStatus.CANCELED, session=session)
                     continue
                     
+                keep_alive_secs = config_get_int(
+                    "sense", "sense_keep_alive_seconds", default=60, constraint="nonneg"
+                )
                 if req.rucio_finished_at is None:
                     logging.warning(
                         f"Request {req.rule_id} has no rucio_finished_at timestamp; "
-                        "using immediate cancellation path"
+                        "proceeding with cancellation immediately"
                     )
-                    time_since_update = config_get_int("sense", "sense_keep_alive_seconds", default=60, constraint="nonneg")
-                else:
-                    time_since_update = (datetime.now() - req.rucio_finished_at).total_seconds()
-                if time_since_update < config_get_int("sense", "sense_keep_alive_seconds", default=60, constraint="nonneg"):
-                    logging.debug(f"Request {req.rule_id} updated {time_since_update:.0f}s ago, waiting before cancellation")
+                elif (datetime.now() - req.rucio_finished_at).total_seconds() < keep_alive_secs:
+                    logging.debug(
+                        f"Request {req.rule_id} finished {(datetime.now() - req.rucio_finished_at).total_seconds():.0f}s ago, "
+                        f"waiting for keep-alive window ({keep_alive_secs}s) before cancellation"
+                    )
                     continue
 
                 logging.info(f"Cancelling SENSE link with uuid {req.sense_uuid} for request {req.rule_id}")

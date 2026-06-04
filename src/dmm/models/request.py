@@ -31,6 +31,7 @@ class SenseCircuitStatus(str, Enum):
     MODIFY_READY       = "MODIFY - READY"
     MODIFY_COMMITTING  = "MODIFY - COMMITTING"
     MODIFY_COMMITTED   = "MODIFY - COMMITTED"
+    MODIFY_FAILED      = "MODIFY - FAILED"
     REINSTATE_READY    = "REINSTATE - READY"
     CANCEL_READY       = "CANCEL - READY"
 
@@ -83,6 +84,8 @@ class Request(ModelBase, table=True):
         super().__init__(**kwargs)
 
     def __eq__(self, other):
+        if not isinstance(other, Request):
+            return NotImplemented
         return self.rule_id == other.rule_id
 
     @classmethod

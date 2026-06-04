@@ -38,10 +38,12 @@ class FTSModifierDaemon(DaemonBase):
     def _delete_request(self, req, session):
         if req.fts_streams_current != 0:
             if not req.src_endpoint or not req.dst_endpoint:
-                logging.warning(
-                    f"Skipping FTS delete for request {req.rule_id}: missing source or destination endpoint"
+                # Cannot call delete_fts_config without endpoints — log prominently so
+                # the operator knows the FTS stream cap was NOT actually removed.
+                logging.error(
+                    f"Cannot remove FTS stream cap for request {req.rule_id}: "
+                    "missing source or destination endpoint. The cap may still be active in FTS."
                 )
-                req.set_fts_streams(current=0, session=session)
                 return
             logging.debug(f"Deleting FTS limits for request {req.rule_id}")
             delete_fts_config(req.src_endpoint, req.dst_endpoint)

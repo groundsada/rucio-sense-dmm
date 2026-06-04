@@ -13,7 +13,10 @@ from dmm.core.sense import (
     affiliate_endpoints,
     is_affiliated_state,
     is_create_ready,
-    is_create_failed
+    is_create_failed,
+    is_modify_failed,
+    is_being_modified,
+    is_ready_for_modify,
 )
 from dmm.core.utils import release_endpoints_and_addresses
 
@@ -38,6 +41,10 @@ class SENSEHandlerDaemon(DaemonBase):
         priorities = [max(0, int(req.priority or 0)) for req in reqs]
         total_priority = sum(priorities)
 
+        if total_priority == 0:
+            share, remainder = divmod(max_streams, n_reqs)
+            return {req.rule_id: share + (1 if i < remainder else 0) for i, req in enumerate(reqs)}
+
         exact_shares = [max_streams * (prio / total_priority) for prio in priorities]
         floored_shares = [floor(share) for share in exact_shares]
         allocation = {req.rule_id: floored_shares[idx] for idx, req in enumerate(reqs)}
@@ -58,7 +65,7 @@ class SENSEHandlerDaemon(DaemonBase):
     @staticmethod
     def _pair_stream_cap(src_site_name: str, dst_site_name: str) -> int:
         pair_key = f"{src_site_name}-{dst_site_name}"
-        default_streams = config_get_int("fts", "default_num_streams", default=20)
+        default_streams = config_get_int("fts", "default_num_streams", default=200)
         return config_get_int("fts-streams", pair_key, default=default_streams)
 
     def _rebalance_fts_streams(self, session) -> None:
@@ -122,6 +129,10 @@ class SENSEHandlerDaemon(DaemonBase):
             if req.sense_uuid is None:
                 continue
 
+            # Capture the DB-side circuit status BEFORE polling SENSE so we can
+            # detect state transitions (e.g. MODIFY_COMMITTING → MODIFY_READY).
+            prev_circuit_status = req.sense_circuit_status
+
             status = get_instance_status(req.sense_uuid)
             req.set_sense_circuit_status(status=status, session=session)
 
@@ -139,7 +150,6 @@ class SENSEHandlerDaemon(DaemonBase):
                 )
                 req.update({"sense_affiliated": True}, session=session)
 
-            # Update sense_provisioned_at if the status is READY for monitoring
             if not req.sense_provisioned_at and is_create_ready(status):
                 logging.debug(f"Request {req.rule_id} is ready, updating sense_provisioned_at to current time.")
                 req.update({"sense_provisioned_at": datetime.now()}, session=session)
@@ -150,6 +160,30 @@ class SENSEHandlerDaemon(DaemonBase):
                     "marking as RETRY to re-enter SENSE retry flow"
                 )
                 req.set_status(RequestStatus.RETRY, session=session)
+
+            elif (
+                req.transfer_status == RequestStatus.STALE
+                and is_being_modified(prev_circuit_status)
+                and is_ready_for_modify(status)
+            ):
+                # The modifier set circuit_status = MODIFY_COMMITTING optimistically when
+                # it called modify_link.  SENSE has now confirmed the delta was applied
+                # (transitioned back to a READY state).  Safe to mark PROVISIONED.
+                logging.info(
+                    f"Request {req.rule_id} SENSE modification confirmed "
+                    f"({prev_circuit_status} → {status}), marking as PROVISIONED"
+                )
+                req.set_status(RequestStatus.PROVISIONED, session=session)
+
+            elif req.transfer_status == RequestStatus.PROVISIONED and is_modify_failed(status):
+                # A modification entered MODIFY - FAILED while the request was already
+                # PROVISIONED (e.g. SENSE-O internally retried and failed).  Re-queue as
+                # STALE so the modifier's MODIFY_FAILED handler can cancel + rebuild.
+                logging.warning(
+                    f"Request {req.rule_id} circuit {req.sense_uuid} entered MODIFY - FAILED "
+                    "while PROVISIONED; re-queuing as STALE for modifier to cancel and rebuild"
+                )
+                req.set_status(RequestStatus.STALE, session=session)
 
         self._rebalance_fts_streams(session)
                 
