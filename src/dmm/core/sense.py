@@ -5,11 +5,10 @@ extracted from the SENSE daemons for better separation of concerns.
 """
 import logging
 import json
-import re
 import ipaddress
 
 from sense.client.workflow_combined_api import WorkflowCombinedApi
-from sense.client.address_api import AddressApi
+from sense.client.address_api import AddressApi 
 
 def _good_response(response):
     """Check if SENSE API response is valid (no errors)."""
@@ -117,13 +116,15 @@ def stage_link(profile_uuid, src_site, dst_site, src_ip_range, dst_ip_range, vla
                 logging.error(f"Failed to clean up partially created SENSE instance for {rule_id}: {cleanup_err}")
         raise ValueError(f"Failed to stage link for {rule_id}") from e
 
-def parse_staging_response(response):
+def parse_staging_response(response, src_ip_range=None, dst_ip_range=None):
     """
     Parse the response from stage_link to extract relevant information.
-    
+
     Args:
         response: Response dict from stage_link
-        
+        src_ip_range: Known source IPv6 prefix (used to match URIs to correct endpoints)
+        dst_ip_range: Known destination IPv6 prefix (used to match URIs to correct endpoints)
+
     Returns:
         Tuple of (sense_uuid, bandwidth_mbps, src_uri, dst_uri)
     """
@@ -141,19 +142,61 @@ def parse_staging_response(response):
     bw_results = bw_query.get("results", [])
     if not bw_results:
         raise ValueError("Missing bandwidth results in staging response")
-    bandwidth_mbps = int((bw_results[0] or {}).get("bandwidth", 0)) / (1000 * 1000)  # Convert from bps to Mbps
+    raw_bw_bps = int((bw_results[0] or {}).get("bandwidth", 0))
+    bandwidth_mbps = raw_bw_bps / (1000 * 1000)
+    logging.debug(f"Staging bandwidth: raw={raw_bw_bps} bps → {bandwidth_mbps:.0f} Mbps")
 
     extract_query = queries[2] if isinstance(queries[2], dict) else {}
     extract_results = extract_query.get("results", [])
     if len(extract_results) < 2:
         raise ValueError("Missing endpoint extraction results in staging response")
 
-    src_uri = (extract_results[0] or {}).get("ipv6_subnet_uri")
-    dst_uri = (extract_results[1] or {}).get("ipv6_subnet_uri")
+    src_uri, dst_uri = _match_uris_to_endpoints(extract_results, src_ip_range, dst_ip_range)
     if not src_uri or not dst_uri:
         raise ValueError("Missing source or destination IPv6 subnet URI in staging response")
 
     return sense_uuid, bandwidth_mbps, src_uri, dst_uri
+
+def _match_uris_to_endpoints(extract_results, src_ip_range, dst_ip_range):
+    """
+    Match SPARQL extract results to source/destination endpoints by subnet value.
+    Falls back to positional order if IP ranges are not provided or no match is found.
+    """
+    if src_ip_range and dst_ip_range:
+        src_uri = dst_uri = None
+        try:
+            src_compressed = ipaddress.IPv6Network(src_ip_range).compressed
+            dst_compressed = ipaddress.IPv6Network(dst_ip_range).compressed
+        except ValueError:
+            src_compressed = dst_compressed = None
+
+        for entry in extract_results:
+            if not isinstance(entry, dict):
+                continue
+            subnet = entry.get("ipv6_subnet", "")
+            uri = entry.get("ipv6_subnet_uri")
+            try:
+                subnet_compressed = ipaddress.IPv6Network(subnet).compressed if subnet else None
+            except ValueError:
+                subnet_compressed = None
+
+            if src_compressed and subnet_compressed == src_compressed:
+                src_uri = uri
+            elif dst_compressed and subnet_compressed == dst_compressed:
+                dst_uri = uri
+
+        if src_uri and dst_uri:
+            return src_uri, dst_uri
+
+        logging.warning(
+            "Could not match SPARQL results to known IP ranges "
+            f"(src={src_ip_range}, dst={dst_ip_range}); falling back to positional order"
+        )
+
+    # Positional fallback (original behaviour)
+    src_uri = (extract_results[0] or {}).get("ipv6_subnet_uri")
+    dst_uri = (extract_results[1] or {}).get("ipv6_subnet_uri")
+    return src_uri, dst_uri
 
 def provision_link(sense_uuid, profile_uuid, bandwidth_mbps, src_site, dst_site, 
                    src_ip_range, dst_ip_range, vlan_range, rule_id):
@@ -312,6 +355,10 @@ def is_create_ready(status):
 def is_create_failed(status):
     """Check if instance creation has failed."""
     return status == SenseCircuitStatus.CREATE_FAILED.value
+
+def is_modify_failed(status):
+    """Check if instance modification has failed."""
+    return status == SenseCircuitStatus.MODIFY_FAILED.value
 
 def is_ready_for_modify(status):
     """Check if instance is in a state that can be modified."""
