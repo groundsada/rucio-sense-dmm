@@ -46,11 +46,32 @@ class SENSEStagerDaemon(DaemonBase):
                     
                 logging.debug(f"Staging returned response {response}")
                 
-                sense_uuid, bandwidth_mbps, src_uri, dst_uri = parse_staging_response(response)
-                
+                sense_uuid, bandwidth_mbps, src_uri, dst_uri = parse_staging_response(
+                    response,
+                    src_ip_range=req.src_endpoint.ip_range,
+                    dst_ip_range=req.dst_endpoint.ip_range,
+                )
+
                 if not sense_uuid:
                     raise ValueError("No service_uuid in response")
-                
+
+                # Guard: SENSE-O's total-block-maximum-bandwidth can return the full
+                # link capacity (not remaining available bandwidth) when the internal
+                # reservation table is stale or the API semantics change. Cap to the
+                # mesh link capacity so we never ask SENSE to provision more than the
+                # physical link supports.
+                mesh_cap = Mesh.get_link_capacity(req.src_site, session=session)
+                dst_cap = Mesh.get_link_capacity(req.dst_site, session=session)
+                if mesh_cap is not None and dst_cap is not None:
+                    link_cap = min(mesh_cap, dst_cap)
+                    if bandwidth_mbps > link_cap:
+                        logging.warning(
+                            f"SENSE reported {bandwidth_mbps:.0f} Mbps available for {req.rule_id}, "
+                            f"but mesh link capacity is {link_cap} Mbps — capping to link capacity. "
+                            "This may indicate SENSE returned total capacity instead of available capacity."
+                        )
+                        bandwidth_mbps = link_cap
+
                 req.set_sense_uuid(sense_uuid, session=session)
                 req.set_sense_uris(src_uri, dst_uri, session=session)
                 req.set_available_bandwidth(bandwidth_mbps, session=session)

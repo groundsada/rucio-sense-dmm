@@ -3,11 +3,18 @@ import logging
 from dmm.daemons.base import DaemonBase
 
 from dmm.db.session import databased
-from dmm.models.request import Request, RequestStatus
+from dmm.models.request import Request, RequestStatus, SenseCircuitStatus
 from dmm.models.mesh import Mesh
 
 from dmm.core.config import config_get
-from dmm.core.sense import modify_link, is_ready_for_modify, is_being_modified
+from dmm.core.sense import (
+    modify_link,
+    cancel_link,
+    delete_instance,
+    is_ready_for_modify,
+    is_being_modified,
+    is_modify_failed,
+)
 
 class SENSEModifierDaemon(DaemonBase):
     def __init__(self, frequency, **kwargs):
@@ -94,6 +101,60 @@ class SENSEModifierDaemon(DaemonBase):
                 
             try:
                 status = req.sense_circuit_status
+
+                if status == "UNKNOWN":
+                    # The circuit UUID is no longer known to SENSE-O — most likely cleaned up
+                    # by its ConsistencyService (zombie instance).  We cannot modify or recover
+                    # a zombie; reset the request to ALLOCATED so the stager creates a fresh
+                    # SENSE instance using the same already-allocated endpoints.
+                    logging.warning(
+                        f"Request {req.rule_id} is STALE but circuit {req.sense_uuid} has "
+                        "UNKNOWN status — treating as zombie, resetting to ALLOCATED for re-staging"
+                    )
+                    req.update({
+                        "sense_uuid": None,
+                        "sense_src_uri": None,
+                        "sense_dst_uri": None,
+                        "sense_circuit_status": None,
+                        "sense_affiliated": False,
+                        "sense_provisioned_at": None,
+                        "sense_retries": 0,
+                        "transfer_status": RequestStatus.ALLOCATED,
+                    }, session=session)
+                    continue
+
+                if is_modify_failed(status):
+                    logging.warning(
+                        f"Request {req.rule_id} circuit {req.sense_uuid} is in MODIFY - FAILED. "
+                        "Cancelling and deleting the failed instance to rebuild from scratch."
+                    )
+                    failed_uuid = req.sense_uuid
+                    try:
+                        cancel_link(failed_uuid, status)
+                        delete_instance(failed_uuid)
+                        logging.info(
+                            f"Successfully cancelled and deleted MODIFY-FAILED instance "
+                            f"{failed_uuid} for {req.rule_id}"
+                        )
+                    except Exception as e:
+                        logging.error(
+                            f"Failed to cancel/delete MODIFY-FAILED instance {failed_uuid} "
+                            f"for {req.rule_id}: {e} — will retry next cycle",
+                            exc_info=True,
+                        )
+                        continue
+                    req.update({
+                        "sense_uuid": None,
+                        "sense_src_uri": None,
+                        "sense_dst_uri": None,
+                        "sense_circuit_status": None,
+                        "sense_affiliated": False,
+                        "sense_provisioned_at": None,
+                        "sense_retries": 0,
+                        "transfer_status": RequestStatus.ALLOCATED,
+                    }, session=session)
+                    continue
+
                 if not is_ready_for_modify(status):
                     logging.debug(f"Cannot modify request {req.rule_id} in status '{status}', will try again later")
                     continue
@@ -114,9 +175,11 @@ class SENSEModifierDaemon(DaemonBase):
                     vlan_range=vlan_range,
                     rule_id=req.rule_id
                 )
-                
-                req.set_status(status=RequestStatus.PROVISIONED, session=session)
-                logging.info(f"Successfully modified request {req.rule_id}")
+
+                req.set_sense_circuit_status(
+                    status=SenseCircuitStatus.MODIFY_COMMITTING.value, session=session
+                )
+                logging.info(f"Submitted bandwidth modification for {req.rule_id}, waiting for SENSE confirmation")
                 
             except Exception as e:
                 logging.error(f"Failed to modify link for {req.rule_id}: {e}", exc_info=True)
