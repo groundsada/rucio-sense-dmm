@@ -60,10 +60,8 @@ class SENSEStagerDaemon(DaemonBase):
                 # reservation table is stale or the API semantics change. Cap to the
                 # mesh link capacity so we never ask SENSE to provision more than the
                 # physical link supports.
-                mesh_cap = Mesh.get_link_capacity(req.src_site, session=session)
-                dst_cap = Mesh.get_link_capacity(req.dst_site, session=session)
-                if mesh_cap is not None and dst_cap is not None:
-                    link_cap = min(mesh_cap, dst_cap)
+                link_cap = Mesh.get_link_capacity(req.src_site, req.dst_site, session=session)
+                if link_cap is not None:
                     if bandwidth_mbps > link_cap:
                         logging.warning(
                             f"SENSE reported {bandwidth_mbps:.0f} Mbps available for {req.rule_id}, "
