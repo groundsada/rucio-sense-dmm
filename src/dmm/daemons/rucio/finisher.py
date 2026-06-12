@@ -38,8 +38,9 @@ class RucioFinisherDaemon(DaemonBase):
         try:
             status = get_rule_status(client, req.rule_id)
         except RuleNotFound as e:
-            logging.error(f"Request {req.rule_id} not found in Rucio (probably because of the reaper), marking as FINISHED in DMM")
-            req.set_status(status=RequestStatus.FINISHED, session=session)
+            logging.error(f"Request {req.rule_id} not found in Rucio (probably because of the reaper), marking as FINISHED_R in DMM")
+            req.set_status(status=RequestStatus.FINISHED_R, session=session)
+            req.update({"rucio_finished_at": datetime.now()}, session=session)
             return
             
         if is_rule_ok(status):

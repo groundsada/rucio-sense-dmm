@@ -59,20 +59,26 @@ class SENSEModifierDaemon(DaemonBase):
                 logging.debug(f"Request {req.rule_id} is already being modified, skipping")
                 continue
 
+            if req.sense_uuid is None:
+                logging.info(f"Request {req.rule_id} finished before SENSE circuit was created, marking as FINISHED directly")
+                req.set_status(status=RequestStatus.FINISHED, session=session)
+                continue
+
             # Skip if the circuit has been taken over by a new provisioned request
-            if req.sense_uuid and req.sense_uuid in reused_uuids:
+            if req.sense_uuid in reused_uuids:
                 logging.debug(
                     f"Request {req.rule_id} circuit {req.sense_uuid} has been reused by another "
                     f"request — skipping throttle/teardown, marking as DELETED"
                 )
                 req.set_status(status=RequestStatus.DELETED, session=session)
                 continue
-            
+
             try:
                 vlan_range = Mesh.get_vlan_range(site_1=req.src_site, site_2=req.dst_site, session=session)
                 if not vlan_range:
                     logging.error(f"No VLAN range found for {req.rule_id}")
                     continue
+                
                 modify_link(
                     sense_uuid=req.sense_uuid,
                     profile_uuid=self.profile_uuid,

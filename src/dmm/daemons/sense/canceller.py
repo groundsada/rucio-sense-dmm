@@ -28,9 +28,6 @@ class SENSECancellerDaemon(DaemonBase):
         if reqs_finished == []:
             return
 
-        # Guard: build the set of sense_uuids actively held by live requests.
-        # A FINISHED request whose UUID is still referenced by a PROVISIONED request
-        # means the circuit was reused — do not cancel or free its endpoints.
         live_reqs = Request.get_by_status(statuses=[RequestStatus.PROVISIONED, RequestStatus.STALE, RequestStatus.DECIDED, RequestStatus.STAGED], session=session)
         live_uuids = {r.sense_uuid for r in live_reqs if r.sense_uuid}
             
@@ -46,9 +43,9 @@ class SENSECancellerDaemon(DaemonBase):
                     continue
 
                 if req.sense_uuid is None:
-                    logging.debug(f"Request {req.rule_id} has no SENSE UUID, marking endpoints as free")
+                    logging.debug(f"Request {req.rule_id} has no SENSE UUID, releasing endpoints and marking as DELETED")
                     release_endpoints_and_addresses(req, session)
-                    req.set_status(status=RequestStatus.CANCELED, session=session)
+                    req.set_status(status=RequestStatus.DELETED, session=session)
                     continue
                     
                 keep_alive_secs = config_get_int(
