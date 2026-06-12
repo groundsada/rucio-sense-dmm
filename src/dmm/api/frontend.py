@@ -212,7 +212,7 @@ async def mark_finished(request: Request, session=None):
         rule_id = _require_rule_id(data)
         req = _get_request_or_404(rule_id, session)
         _validate_sense_request(req)
-        req.set_status(RequestStatus.FINISHED, session=session)
+        req.set_status(RequestStatus.FINISHED_R, session=session)
         req.update({"rucio_finished_at": datetime.now()}, session=session)
         return "Request marked as finished"
     except HTTPException:
@@ -288,6 +288,19 @@ async def refresh_sites(session=None):
         logging.error(e)
         raise HTTPException(status_code=500, detail="Failed to refresh sites")
     
+@api.get("/logs", response_class=PlainTextResponse)
+async def get_logs():
+    log_path = "dmm.log"
+    if not os.path.exists(log_path):
+        raise HTTPException(status_code=404, detail="Log file not found")
+    try:
+        with open(log_path, "r") as f:
+            lines = f.readlines()
+        return PlainTextResponse("".join(lines[-2000:]))
+    except Exception as e:
+        logging.error(e)
+        raise HTTPException(status_code=500, detail="Failed to read log file")
+
 @api.get("/health")
 async def health_check():
     return {"status": "healthy"}
