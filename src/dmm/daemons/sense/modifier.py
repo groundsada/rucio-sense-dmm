@@ -7,6 +7,7 @@ from dmm.models.request import Request, RequestStatus, SenseCircuitStatus
 from dmm.models.mesh import Mesh
 
 from dmm.core.config import config_get
+from dmm.core.utils import is_sync_timeout
 from dmm.core.sense import (
     modify_link,
     cancel_link,
@@ -93,7 +94,14 @@ class SENSEModifierDaemon(DaemonBase):
                 req.set_status(status=RequestStatus.FINISHED, session=session)
                 logging.info(f"Set request {req.rule_id} to FINISHED")
             except Exception as e:
-                logging.error(f"Failed to set request {req.rule_id} to FINISHED: {e}", exc_info=True)
+                if is_sync_timeout(e):
+                    logging.warning(
+                        f"Throttle of finished request {req.rule_id} timed out (504); "
+                        "treating as applied, marking FINISHED"
+                    )
+                    req.set_status(status=RequestStatus.FINISHED, session=session)
+                else:
+                    logging.error(f"Failed to set request {req.rule_id} to FINISHED: {e}", exc_info=True)
 
         for req in reqs_stale:
             # Skip this specific request if it's already being modified
@@ -186,7 +194,20 @@ class SENSEModifierDaemon(DaemonBase):
                     status=SenseCircuitStatus.MODIFY_COMMITTING.value, session=session
                 )
                 logging.info(f"Submitted bandwidth modification for {req.rule_id}, waiting for SENSE confirmation")
-                
+
             except Exception as e:
-                logging.error(f"Failed to modify link for {req.rule_id}: {e}", exc_info=True)
+                if is_sync_timeout(e):
+                    # 504 — the modify is almost certainly still committing upstream and
+                    # will succeed. Mark MODIFY_COMMITTING (exactly as on a successful
+                    # submit) so the handler confirms MODIFY-READY → PROVISIONED, rather
+                    # than re-issuing the modify against an in-flight commit.
+                    logging.warning(
+                        f"Modify of {req.rule_id} timed out (504); treating as in-flight, "
+                        "marking MODIFY-COMMITTING for handler confirmation"
+                    )
+                    req.set_sense_circuit_status(
+                        status=SenseCircuitStatus.MODIFY_COMMITTING.value, session=session
+                    )
+                else:
+                    logging.error(f"Failed to modify link for {req.rule_id}: {e}", exc_info=True)
             

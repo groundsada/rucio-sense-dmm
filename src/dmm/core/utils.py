@@ -1,6 +1,10 @@
 import logging
 from dmm.core.allocation import free_address
 
+def is_sync_timeout(exc) -> bool:
+    msg = str(exc).lower()
+    return "504" in msg and ("gateway time-out" in msg or "gateway timeout" in msg or "time-out" in msg)
+
 def release_endpoints_and_addresses(req, session):
     """
     Safely marks DB endpoints as free and attempts to release SENSE-O IP locks.

@@ -7,9 +7,10 @@ from dmm.models.request import Request, RequestStatus
 from dmm.models.mesh import Mesh
 
 from dmm.core.config import config_get
+from dmm.core.utils import is_sync_timeout
 from dmm.core.sense import (
-    provision_link, 
-    is_create_ready, 
+    provision_link,
+    is_create_ready,
     is_create_compiled,
     is_being_provisioned,
     is_create_failed,
@@ -94,7 +95,13 @@ class SENSEProvisionerDaemon(DaemonBase):
                 )
                 req.set_status(status=RequestStatus.PROVISIONED, session=session)
                 logging.info(f"Successfully provisioned request {req.rule_id}")
-                
             except Exception as e:
-                logging.error(f"Failed to provision link for {req.rule_id}: {e}", exc_info=True)
-                req.set_status(status=RequestStatus.RETRY, session=session)
+                if is_sync_timeout(e):
+                    logging.warning(
+                        f"Provision for {req.rule_id} timed out (504); treating as in-flight, "
+                        "marking PROVISIONED and deferring to handler status polling"
+                    )
+                    req.set_status(status=RequestStatus.PROVISIONED, session=session)
+                else:
+                    logging.error(f"Failed to provision link for {req.rule_id}: {e}", exc_info=True)
+                    req.set_status(status=RequestStatus.RETRY, session=session)
