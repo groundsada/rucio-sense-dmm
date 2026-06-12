@@ -15,7 +15,7 @@ class FTSModifierDaemon(DaemonBase):
 
     @databased
     def run_once(self, session=None):
-        self._process_requests(session, [RequestStatus.ALLOCATED, RequestStatus.DECIDED, RequestStatus.PROVISIONED], self._modify_request)
+        self._process_requests(session, [RequestStatus.PROVISIONED], self._modify_request)
         self._process_requests(session, [RequestStatus.DELETED], self._delete_request)
 
     def _process_requests(self, session, statuses, action):
