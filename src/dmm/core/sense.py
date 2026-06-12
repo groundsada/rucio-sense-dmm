@@ -7,8 +7,9 @@ import logging
 import json
 import ipaddress
 
+
 from sense.client.workflow_combined_api import WorkflowCombinedApi
-from sense.client.address_api import AddressApi 
+from dmm.models.request import SenseCircuitStatus
 
 def _good_response(response):
     """Check if SENSE API response is valid (no errors)."""
@@ -19,18 +20,6 @@ def _good_response(response):
         if error_val:
             return False
     return not any("error" in str(r).lower() for r in response)
-
-def format_ipv6(ip):
-    """Format IPv6 address for SENSE API compatibility."""
-    exploded_ip = ip.network_address.exploded
-    segments = exploded_ip.split(":")
-    simplified_segments = []
-    for segment in segments:
-        if segment == "0000":
-            simplified_segments.append("0")
-        else:
-            simplified_segments.append(segment.lstrip("0") or "0")
-    return f"{':'.join(simplified_segments)}/{ip.prefixlen}"
 
 def get_instance_status(sense_uuid):
     """
@@ -294,7 +283,7 @@ def modify_link(sense_uuid, profile_uuid, bandwidth_mbps, src_site, dst_site,
             "alias": rule_id
         }
         response = workflow_api.instance_modify(json.dumps(intent), sync="true")
-        return response
+        return True
     except Exception as e:
         logging.error(f"Failed to modify request {rule_id}: {e}")
         raise
@@ -315,7 +304,6 @@ def cancel_link(sense_uuid, status=None):
     response = workflow_api.instance_operate("cancel", si_uuid=sense_uuid, sync="true", force=str(force_cancel).lower())
     return response
 
-
 def delete_instance(sense_uuid):
     """
     Delete a SENSE instance.
@@ -330,7 +318,6 @@ def delete_instance(sense_uuid):
     response = workflow_api.instance_delete(si_uuid=sense_uuid)
     return response
 
-from dmm.models.request import SenseCircuitStatus
 
 def is_cancel_ready(status):
     """Check if instance is in CANCEL-READY state."""
@@ -384,6 +371,14 @@ def is_being_provisioned(status):
         SenseCircuitStatus.MODIFY_COMMITTED.value
     }
 
+def is_circuit_active(status):
+    """Check if the circuit is up and stable (carrying traffic)."""
+    return status in {
+        SenseCircuitStatus.CREATE_READY.value,
+        SenseCircuitStatus.MODIFY_READY.value,
+        SenseCircuitStatus.REINSTATE_READY.value,
+    }
+
 def is_affiliated_state(status):
     """Check if instance is in a state where endpoints should be affiliated."""
     return status in {
@@ -392,38 +387,3 @@ def is_affiliated_state(status):
         SenseCircuitStatus.CREATE_COMMITTING.value,
         SenseCircuitStatus.CREATE_READY.value
     }
-
-def affiliate_endpoints(sense_uuid, src_site_name, dst_site_name, src_ip_range, dst_ip_range, 
-                        sense_src_uri, sense_dst_uri):
-    """
-    Affiliate endpoints with a SENSE instance.
-    
-    Args:
-        sense_uuid: SENSE instance UUID
-        src_site_name: Source site name
-        dst_site_name: Destination site name
-        src_ip_range: Source endpoint IPv6 range
-        dst_ip_range: Destination endpoint IPv6 range
-        sense_src_uri: SENSE source URI
-        sense_dst_uri: SENSE destination URI
-        
-    Raises:
-        Exception: If affiliation fails
-    """
-    address_api = AddressApi()
-    
-    try:
-        src_pool_name = f'RUCIO_Site_BGP_Subnet_Pool-{src_site_name}'
-        exploded_source_ip = format_ipv6(ipaddress.IPv6Network(src_ip_range))
-        logging.debug(f"Affiliating source endpoint {exploded_source_ip} with SENSE instance {sense_uuid} in address pool {src_pool_name}")
-        address_api.affiliate_address(pool=src_pool_name, uri=sense_src_uri, address=exploded_source_ip)
-
-        dst_pool_name = f'RUCIO_Site_BGP_Subnet_Pool-{dst_site_name}'
-        exploded_dest_ip = format_ipv6(ipaddress.IPv6Network(dst_ip_range))
-        logging.debug(f"Affiliating destination endpoint {exploded_dest_ip} with SENSE instance {sense_uuid} in address pool {dst_pool_name}")
-        address_api.affiliate_address(pool=dst_pool_name, uri=sense_dst_uri, address=exploded_dest_ip)
-        
-        logging.info(f"Successfully affiliated endpoints for SENSE instance {sense_uuid}")
-    except Exception as e:
-        logging.error(f"Failed to affiliate endpoints for SENSE instance {sense_uuid}: {e}", exc_info=True)
-        raise
