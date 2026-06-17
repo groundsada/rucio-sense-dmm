@@ -36,10 +36,10 @@ cd etc/
 
 Ensure all required Rucio Storage Elements (RSEs) are configured before deploying DMM. If RSEs are added later, use the "Refresh Sites" button in the DMM web interface (Sites tab).
 
-#### 4. Deploy to Kubernetes
+#### 4. Deploy to Kubernetes using Helm
 
 ```bash
-kubectl apply -f etc/deploy.yaml
+helm install dmm etc/helm/
 ```
 
 The deployment includes an embedded PostgreSQL instance. For production environments, consider using an external managed database service.

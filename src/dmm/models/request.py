@@ -57,7 +57,8 @@ class Request(ModelBase, table=True):
     prometheus_bytes: Optional[float] = Field(default=None)
     health: Optional[str] = Field(default=None)
     sense_retries: Optional[int] = Field(default=0)
-    
+    sense_alloc_rule_id: Optional[str] = Field(default=None)
+
     src_site_: Optional[str] = Field(default=None, foreign_key='site.name')
     dst_site_: Optional[str] = Field(default=None, foreign_key='site.name')
     src_endpoint_: Optional[int] = Field(default=None, foreign_key='endpoint.id')

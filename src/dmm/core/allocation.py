@@ -49,7 +49,6 @@ def allocate_address(sitename, alloc_name):
         return response
     except Exception as e:
         logging.error(f"allocate_address: {str(e)}")
-        # Try to free the address if allocation failed partially
         try:
             address_api.free_address(pool_name, name=alloc_name)
         except Exception as cleanup_err:
@@ -83,6 +82,40 @@ def free_address(sitename, alloc_name):
     except Exception as e:
         logging.error(f"free_address: {str(e)}")
         raise ValueError(f"Freeing allocation failed for {sitename} and {alloc_name}")
+
+def affiliate_endpoints(sense_uuid, src_site_name, dst_site_name, rule_id,
+                        sense_src_uri, sense_dst_uri):
+    """
+    Affiliate endpoints with a SENSE instance.
+    
+    Args:
+        sense_uuid: SENSE instance UUID
+        src_site_name: Source site name
+        dst_site_name: Destination site name
+        rule_id: Rule ID used as alias for the affiliation in SENSE-O
+        sense_src_uri: SENSE source URI
+        sense_dst_uri: SENSE destination URI
+        
+    Raises:
+        Exception: If affiliation fails
+    """
+    address_api = AddressApi()
+    
+    try:
+        src_pool_name = f'RUCIO_Site_BGP_Subnet_Pool-{src_site_name}'
+        logging.debug(f"Affiliating allocation {rule_id} with SENSE instance {sense_uuid} in address pool {src_pool_name}")
+        address_api.affiliate_address(pool=src_pool_name, uri=sense_src_uri, name=rule_id)
+        address_api.expire_address(pool=src_pool_name, expire=-1, name=rule_id)
+
+        dst_pool_name = f'RUCIO_Site_BGP_Subnet_Pool-{dst_site_name}'
+        logging.debug(f"Affiliating allocation {rule_id} with SENSE instance {sense_uuid} in address pool {dst_pool_name}")
+        address_api.affiliate_address(pool=dst_pool_name, uri=sense_dst_uri, name=rule_id)
+        address_api.expire_address(pool=dst_pool_name, expire=-1, name=rule_id)
+        
+        logging.info(f"Successfully affiliated endpoints for SENSE instance {sense_uuid}")
+    except Exception as e:
+        logging.error(f"Failed to affiliate endpoints for SENSE instance {sense_uuid}: {e}", exc_info=True)
+        raise
 
 def format_ipv6_compressed(ip_range):
     """

@@ -9,6 +9,7 @@ from dmm.daemons.base import DaemonBase
 from dmm.models.request import Request, RequestStatus
 from dmm.models.mesh import Mesh
 from dmm.db.session import databased
+from dmm.core.sense import is_circuit_active, is_being_provisioned
 
 class DeciderDaemon(DaemonBase):
     def __init__(self, frequency, **kwargs):
@@ -43,10 +44,9 @@ class DeciderDaemon(DaemonBase):
         if reqs == []:
             return multi_graph
         for req in reqs:
-            src_link_capacity_mbps = Mesh.get_link_capacity(req.src_site, session=session)
-            multi_graph.add_node(req.src_site.name, link_capacity_mbps=src_link_capacity_mbps)
-            dst_link_capacity_mbps = Mesh.get_link_capacity(req.dst_site, session=session)
-            multi_graph.add_node(req.dst_site.name, link_capacity_mbps=dst_link_capacity_mbps)
+            link_capacity_mbps = Mesh.get_link_capacity(req.src_site, req.dst_site, session=session)
+            multi_graph.add_node(req.src_site.name, link_capacity_mbps=link_capacity_mbps)
+            multi_graph.add_node(req.dst_site.name, link_capacity_mbps=link_capacity_mbps)
             multi_graph.add_edge(
                 req.src_site.name, req.dst_site.name,
                 rule_id=req.rule_id,
@@ -178,25 +178,37 @@ class DeciderDaemon(DaemonBase):
 
     def _modify_existing_bandwidth(self, multi_graph, session) -> None:
         """
-        Modify the bandwidth for existing requests and mark them as stale
+        Modify the bandwidth for existing requests and mark them as stale.
+
         """
-        reqs_provisioned = Request.get_by_status(statuses=[RequestStatus.MODIFIED, RequestStatus.PROVISIONED], session=session)
+        reqs_provisioned = Request.get_by_status(statuses=[RequestStatus.MODIFIED, RequestStatus.PROVISIONED, RequestStatus.DECIDED], session=session)
         for req in reqs_provisioned:
             allocated_bandwidth = None  # Initialize to prevent NameError
             for _, _, key, data in multi_graph.edges(keys=True, data=True):
                 if "rule_id" in data and data["rule_id"] == req.rule_id:
                     allocated_bandwidth = int(data["bandwidth"])
                     break  # Found the matching edge, no need to continue
-            
+
             if allocated_bandwidth is None:
                 logging.error(f"Could not find bandwidth allocation for request {req.rule_id} in multi_graph")
                 continue  # Skip this request, don't update it
-                
-            if allocated_bandwidth != req.allocated_bandwidth_mbps:
-                req.set_previous_bandwidth(req.allocated_bandwidth_mbps, session=session)
+
+            if allocated_bandwidth == req.allocated_bandwidth_mbps:
+                continue
+
+            circuit_committed = (
+                is_circuit_active(req.sense_circuit_status)
+                or is_being_provisioned(req.sense_circuit_status)
+            )
+            if req.transfer_status == RequestStatus.DECIDED and not circuit_committed:
                 req.set_allocated_bandwidth(allocated_bandwidth, session=session)
-                logging.info(f"Modified bandwidth for request {req.rule_id}: {allocated_bandwidth}")
-                req.set_status(status=RequestStatus.STALE, session=session)
+                logging.info(f"Updated decided bandwidth for not-yet-provisioned request {req.rule_id}: {allocated_bandwidth}")
+                continue
+
+            req.set_previous_bandwidth(req.allocated_bandwidth_mbps, session=session)
+            req.set_allocated_bandwidth(allocated_bandwidth, session=session)
+            logging.info(f"Modified bandwidth for request {req.rule_id}: {allocated_bandwidth}")
+            req.set_status(status=RequestStatus.STALE, session=session)
 
     @staticmethod
     def _good_response(response):
