@@ -14,6 +14,7 @@
     <nav>
         <a href="/">Home</a>
         <a href="/sites">Sites</a>
+        <a href="/logs" target="_blank" rel="noopener">Logs</a>
     </nav>
     <div class="container">
         <div class="card details-card">
@@ -23,6 +24,16 @@
             {% set health_status = data.health if data.health is not none else 'UNKNOWN' %}
 
             <h2>{{ data.rule_id }}</h2>
+
+            {% if data.failure_reason %}
+            <div class="failure-banner">
+                <div class="failure-label">
+                    {% if transfer_status == 'FAILED' %}Failure Reason{% else %}Last Error (retrying){% endif %}
+                    {% if data.failed_at %}<span class="failure-time">— {{ data.failed_at }}</span>{% endif %}
+                </div>
+                <pre class="failure-text">{{ data.failure_reason }}</pre>
+            </div>
+            {% endif %}
 
             <div class="details-grid">
                 <div class="summary-box">
@@ -116,6 +127,7 @@
                     <div class="details-row"><span class="details-label">Updated:</span><span class="details-value">{{ data.updated_at if data.updated_at else '—' }}</span></div>
                     <div class="details-row"><span class="details-label">SENSE Provisioned At:</span><span class="details-value">{{ data.sense_provisioned_at if data.sense_provisioned_at else '—' }}</span></div>
                     <div class="details-row"><span class="details-label">Rucio Finished At:</span><span class="details-value">{{ data.rucio_finished_at if data.rucio_finished_at else '—' }}</span></div>
+                    <div class="details-row"><span class="details-label">Failed At:</span><span class="details-value">{{ data.failed_at if data.failed_at else '—' }}</span></div>
                 </div>
             </div>
 

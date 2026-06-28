@@ -1,5 +1,5 @@
 from sqlmodel import Field, Relationship, select
-from typing import Optional, List
+from typing import Optional, List, ClassVar
 from enum import Enum
 
 import logging
@@ -58,6 +58,8 @@ class Request(ModelBase, table=True):
     health: Optional[str] = Field(default=None)
     sense_retries: Optional[int] = Field(default=0)
     sense_alloc_rule_id: Optional[str] = Field(default=None)
+    failure_reason: Optional[str] = Field(default=None)
+    failed_at: Optional[datetime] = Field(default=None)
 
     src_site_: Optional[str] = Field(default=None, foreign_key='site.name')
     dst_site_: Optional[str] = Field(default=None, foreign_key='site.name')
@@ -105,9 +107,52 @@ class Request(ModelBase, table=True):
             statement = statement.with_for_update()
         return session.exec(statement).first()
     
+    # Failure reasons can be long (tracebacks, SENSE error blobs); cap what we persist.
+    FAILURE_REASON_MAX_LEN: ClassVar[int] = 2000
+
+    @classmethod
+    def _truncate_reason(cls, reason) -> Optional[str]:
+        if reason is None:
+            return None
+        reason = str(reason).strip()
+        if len(reason) > cls.FAILURE_REASON_MAX_LEN:
+            reason = reason[: cls.FAILURE_REASON_MAX_LEN - 3] + "..."
+        return reason
+
     def set_status(self, status: str, session=None):
         logging.debug(f"REQUEST UPDATE: {self.rule_id} -> status={status}")
-        self.transfer_status = status 
+        self.transfer_status = status
+        self.save(session)
+
+    def set_failure_reason(self, reason, session=None):
+        reason = self._truncate_reason(reason)
+        logging.debug(f"REQUEST UPDATE: {self.rule_id} -> failure_reason={reason}")
+        self.failure_reason = reason
+        self.save(session)
+
+    def clear_failure_reason(self, session=None):
+        if self.failure_reason is None and self.failed_at is None:
+            return
+        logging.debug(f"REQUEST UPDATE: {self.rule_id} -> clearing failure_reason")
+        self.failure_reason = None
+        self.failed_at = None
+        self.save(session)
+
+    def mark_failed(self, reason, session=None):
+        """Permanently fail the request, recording why and when."""
+        reason = self._truncate_reason(reason)
+        logging.debug(f"REQUEST UPDATE: {self.rule_id} -> FAILED ({reason})")
+        self.transfer_status = RequestStatus.FAILED
+        self.failure_reason = reason
+        self.failed_at = datetime.now()
+        self.save(session)
+
+    def mark_retry(self, reason, session=None):
+        """Transient failure: record the reason but keep the request retrying."""
+        reason = self._truncate_reason(reason)
+        logging.debug(f"REQUEST UPDATE: {self.rule_id} -> RETRY ({reason})")
+        self.transfer_status = RequestStatus.RETRY
+        self.failure_reason = reason
         self.save(session)
 
     def set_available_bandwidth(self, bandwidth_mbps: float, session=None):

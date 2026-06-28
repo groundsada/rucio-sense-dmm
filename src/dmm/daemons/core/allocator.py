@@ -99,7 +99,7 @@ class AllocatorDaemon(DaemonBase):
         
         # Validate request has required fields
         if not new_request.src_site or not new_request.dst_site:
-            new_request.set_status(RequestStatus.FAILED, session=session)
+            new_request.mark_failed("Missing source or destination site", session=session)
             logging.error(f"Request {new_request.rule_id} is missing source or destination site")
             return
         
@@ -182,7 +182,7 @@ class AllocatorDaemon(DaemonBase):
                     logging.error(f"Failed to free destination allocation for {new_request.rule_id}: {free_err}")
 
             session.refresh(new_request)
-            new_request.set_status(RequestStatus.FAILED, session=session)
+            new_request.mark_failed(f"Endpoint allocation failed: {e}", session=session)
             session.commit()
             logging.error(
                 f"Failed to allocate endpoints for request {new_request.rule_id}: {str(e)}",

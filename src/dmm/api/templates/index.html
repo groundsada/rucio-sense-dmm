@@ -14,8 +14,36 @@
     <nav>
         <a href="/">Home</a>
         <a href="/sites">Sites</a>
+        <a href="/logs" target="_blank" rel="noopener">Logs</a>
     </nav>
+
     <div class="container">
+        <div class="stats" id="stats">
+            <button class="stat-card stat-total is-active" data-filter="all">
+                <span class="stat-num" id="count-all">0</span><span class="stat-label">Total</span>
+            </button>
+            <button class="stat-card stat-active" data-filter="active">
+                <span class="stat-num" id="count-active">0</span><span class="stat-label">Active</span>
+            </button>
+            <button class="stat-card stat-progress" data-filter="progress">
+                <span class="stat-num" id="count-progress">0</span><span class="stat-label">In Progress</span>
+            </button>
+            <button class="stat-card stat-finished" data-filter="finished">
+                <span class="stat-num" id="count-finished">0</span><span class="stat-label">Finished</span>
+            </button>
+            <button class="stat-card stat-failed" data-filter="failed">
+                <span class="stat-num" id="count-failed">0</span><span class="stat-label">Failed</span>
+            </button>
+        </div>
+
+        <div class="toolbar">
+            <input type="search" id="search" class="search-input" placeholder="Search rule ID, site, or hostname…" autocomplete="off">
+            <label class="refresh-toggle">
+                <input type="checkbox" id="autorefresh"> Auto-refresh (15s)
+            </label>
+            <span class="muted" id="meta"></span>
+        </div>
+
         <table>
             <thead>
                 <tr>
@@ -34,36 +62,120 @@
                     <th>Details</th>
                 </tr>
             </thead>
-            <tbody>
+            <tbody id="rules-body">
                 {% for req in data %}
-                <tr>
-                    <td>{{ req.rule_id }}</td>
-                    <td>{{ req.transfer_status }}</td>
-                    <td>{{ req.sense_circuit_status }}</td>
-                    <td>{{ req.src_site.name }}</td>
-                    <td>{{ req.src_endpoint.ip_range }}</td>
-                    <td>{{ req.src_endpoint.hostname }}</td>
-                    <td>{{ req.dst_site.name }}</td>
-                    <td>{{ req.dst_endpoint.ip_range }}</td>
-                    <td>{{ req.dst_endpoint.hostname }}</td>
-                    <td>{{ req.priority }}</td>
-                    <td>{{ req.rule_size / 1024 / 1024 / 1024 }}</td>
-                    <td>{{ req.allocated_bandwidth_mbps / 1000 if req.allocated_bandwidth_mbps is not none else 0 }}</td>
+                {% set status = req.transfer_status if req.transfer_status else 'UNKNOWN' %}
+                {% set circuit = req.sense_circuit_status if req.sense_circuit_status else '' %}
+                <tr class="rule-row {% if status == 'FAILED' %}row-failed{% endif %}"
+                    data-status="{{ status }}"
+                    data-search="{{ req.rule_id }} {{ req.src_site.name if req.src_site else '' }} {{ req.dst_site.name if req.dst_site else '' }} {{ req.src_endpoint.hostname if req.src_endpoint else '' }} {{ req.dst_endpoint.hostname if req.dst_endpoint else '' }}">
+                    <td title="{{ req.rule_id }}">{{ req.rule_id }}</td>
+                    <td>
+                        <span class="status-badge {% if status in ['PROVISIONED', 'FINISHED_R', 'FINISHED', 'DELETED'] %}status-good{% elif status in ['FAILED', 'CANCELED'] %}status-bad{% else %}status-warn{% endif %}">{{ status }}</span>
+                    </td>
+                    <td>
+                        {% if circuit %}
+                        <span class="status-badge {% if 'READY' in circuit %}status-good{% elif 'FAILED' in circuit %}status-bad{% else %}status-warn{% endif %}">{{ circuit }}</span>
+                        {% else %}—{% endif %}
+                    </td>
+                    <td title="{{ req.src_site.name if req.src_site else '' }}">{{ req.src_site.name if req.src_site else '—' }}</td>
+                    <td title="{{ req.src_endpoint.ip_range if req.src_endpoint else '' }}">{{ req.src_endpoint.ip_range if req.src_endpoint else '—' }}</td>
+                    <td title="{{ req.src_endpoint.hostname if req.src_endpoint else '' }}">{{ req.src_endpoint.hostname if req.src_endpoint else '—' }}</td>
+                    <td title="{{ req.dst_site.name if req.dst_site else '' }}">{{ req.dst_site.name if req.dst_site else '—' }}</td>
+                    <td title="{{ req.dst_endpoint.ip_range if req.dst_endpoint else '' }}">{{ req.dst_endpoint.ip_range if req.dst_endpoint else '—' }}</td>
+                    <td title="{{ req.dst_endpoint.hostname if req.dst_endpoint else '' }}">{{ req.dst_endpoint.hostname if req.dst_endpoint else '—' }}</td>
+                    <td>{{ req.priority if req.priority is not none else '—' }}</td>
+                    <td>{{ (req.rule_size / 1024 / 1024 / 1024) | round(2) if req.rule_size is not none else '—' }}</td>
+                    <td>{{ (req.allocated_bandwidth_mbps / 1000) | round(2) if req.allocated_bandwidth_mbps is not none else '—' }}</td>
                     <td><button onclick="sendRuleID(this)">See More</button></td>
                 </tr>
                 {% endfor %}
             </tbody>
         </table>
+        <div class="empty-state" id="empty-state" hidden>No rules match the current filter.</div>
     </div>
+
     <footer>
         <p>&copy; Apache License, Version 2.0</p>
     </footer>
+
     <script>
-        function sendRuleID(button) {
-            let rowElement = button.closest('tr'); 
-            let rule_id = rowElement.cells[0].innerText;
-            window.location.href = `/details/${rule_id}`;
+        const GROUPS = {
+            active: ["PROVISIONED"],
+            progress: ["INIT", "NOT_SENSE", "ALLOCATED", "RETRY", "STAGED", "DECIDED", "STALE", "MODIFIED"],
+            finished: ["FINISHED_R", "FINISHED", "CANCELED", "DELETED"],
+            failed: ["FAILED"],
+        };
+
+        function groupOf(status) {
+            for (const [group, statuses] of Object.entries(GROUPS)) {
+                if (statuses.includes(status)) return group;
+            }
+            return "progress";
         }
+
+        const rows = Array.from(document.querySelectorAll(".rule-row"));
+        const searchInput = document.getElementById("search");
+        const autoRefresh = document.getElementById("autorefresh");
+        const statCards = Array.from(document.querySelectorAll(".stat-card"));
+        const emptyState = document.getElementById("empty-state");
+        const meta = document.getElementById("meta");
+
+        let activeFilter = localStorage.getItem("dmm.filter") || "all";
+        searchInput.value = localStorage.getItem("dmm.search") || "";
+
+        function computeCounts() {
+            const counts = { all: rows.length, active: 0, progress: 0, finished: 0, failed: 0 };
+            rows.forEach(r => { counts[groupOf(r.dataset.status)]++; });
+            for (const key of Object.keys(counts)) {
+                document.getElementById("count-" + key).textContent = counts[key];
+            }
+        }
+
+        function applyFilter() {
+            const term = searchInput.value.trim().toLowerCase();
+            let visible = 0;
+            rows.forEach(r => {
+                const matchesGroup = activeFilter === "all" || groupOf(r.dataset.status) === activeFilter;
+                const matchesTerm = !term || r.dataset.search.toLowerCase().includes(term);
+                const show = matchesGroup && matchesTerm;
+                r.hidden = !show;
+                if (show) visible++;
+            });
+            emptyState.hidden = visible > 0;
+            statCards.forEach(c => c.classList.toggle("is-active", c.dataset.filter === activeFilter));
+            localStorage.setItem("dmm.filter", activeFilter);
+            localStorage.setItem("dmm.search", searchInput.value);
+        }
+
+        statCards.forEach(card => card.addEventListener("click", () => {
+            activeFilter = card.dataset.filter;
+            applyFilter();
+        }));
+
+        searchInput.addEventListener("input", applyFilter);
+
+        // Auto-refresh, with state persisted so the toggle survives reloads.
+        autoRefresh.checked = localStorage.getItem("dmm.autorefresh") === "1";
+        let refreshTimer = null;
+        function syncRefresh() {
+            localStorage.setItem("dmm.autorefresh", autoRefresh.checked ? "1" : "0");
+            if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
+            if (autoRefresh.checked) {
+                refreshTimer = setInterval(() => location.reload(), 15000);
+            }
+        }
+        autoRefresh.addEventListener("change", syncRefresh);
+
+        function sendRuleID(button) {
+            const ruleId = button.closest("tr").cells[0].innerText;
+            window.location.href = `/details/${ruleId}`;
+        }
+
+        computeCounts();
+        applyFilter();
+        syncRefresh();
+        meta.textContent = "Updated " + new Date().toLocaleTimeString();
     </script>
 </body>
 </html>

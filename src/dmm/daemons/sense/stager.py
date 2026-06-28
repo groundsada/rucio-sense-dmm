@@ -27,7 +27,7 @@ class SENSEStagerDaemon(DaemonBase):
                 vlan_range = Mesh.get_vlan_range(site_1=req.src_site, site_2=req.dst_site, session=session)
                 if vlan_range is None:
                     logging.error(f"No VLAN range found for {req.rule_id}, marking as FAILED")
-                    req.set_status(status=RequestStatus.FAILED, session=session)
+                    req.mark_failed(f"No VLAN range found between {req.src_site} and {req.dst_site}", session=session)
                     continue
                     
                 response = stage_link(
@@ -73,8 +73,9 @@ class SENSEStagerDaemon(DaemonBase):
                 req.set_sense_uuid(sense_uuid, session=session)
                 req.set_sense_uris(src_uri, dst_uri, session=session)
                 req.set_available_bandwidth(bandwidth_mbps, session=session)
+                req.clear_failure_reason(session=session)
                 req.set_status(status=RequestStatus.STAGED, session=session)
-                
+
             except Exception as e:
                 logging.error(f"Failed to stage link for {req.rule_id}, {e}, will try again")
-                req.set_status(status=RequestStatus.RETRY, session=session)
+                req.mark_retry(f"Staging failed: {e}", session=session)

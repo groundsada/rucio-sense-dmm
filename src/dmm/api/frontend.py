@@ -123,7 +123,13 @@ async def metrics(session=None):
             "dst_site": req.dst_site.name if req.dst_site else "UNKNOWN",
         }
 
-        _emit_gauge(lines, "dmm_request_info", 1, labels)
+        info_labels = dict(labels)
+        reason = req.failure_reason or ""
+        # Keep label value bounded — full reason lives on the dashboard/details page.
+        if len(reason) > 256:
+            reason = reason[:253] + "..."
+        info_labels["failure_reason"] = reason
+        _emit_gauge(lines, "dmm_request_info", 1, info_labels)
         _emit_gauge(lines, "dmm_request_sense_retries", req.sense_retries if req.sense_retries is not None else 0, labels)
         _emit_gauge(lines, "dmm_request_allocated_bandwidth_mbps", req.allocated_bandwidth_mbps, labels)
         _emit_gauge(lines, "dmm_request_available_bandwidth_mbps", req.available_bandwidth_mbps, labels)

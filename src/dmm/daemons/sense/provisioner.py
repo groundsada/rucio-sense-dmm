@@ -62,6 +62,7 @@ class SENSEProvisionerDaemon(DaemonBase):
                 status = req.sense_circuit_status
                 if is_create_ready(status):
                     logging.debug(f"Request {req.sense_uuid} already in ready status, marking as provisioned")
+                    req.clear_failure_reason(session=session)
                     req.set_status(status=RequestStatus.PROVISIONED, session=session)
                     continue
 
@@ -70,7 +71,7 @@ class SENSEProvisionerDaemon(DaemonBase):
                         f"Request {req.rule_id} is in {status} for SENSE instance {req.sense_uuid}; "
                         "marking as RETRY"
                     )
-                    req.set_status(status=RequestStatus.RETRY, session=session)
+                    req.mark_retry(f"SENSE circuit {req.sense_uuid} in {status}", session=session)
                     continue
                     
                 if not is_create_compiled(status):
@@ -93,6 +94,7 @@ class SENSEProvisionerDaemon(DaemonBase):
                     vlan_range=vlan_range,
                     rule_id=req.rule_id
                 )
+                req.clear_failure_reason(session=session)
                 req.set_status(status=RequestStatus.PROVISIONED, session=session)
                 logging.info(f"Successfully provisioned request {req.rule_id}")
             except Exception as e:
@@ -104,4 +106,4 @@ class SENSEProvisionerDaemon(DaemonBase):
                     req.set_status(status=RequestStatus.PROVISIONED, session=session)
                 else:
                     logging.error(f"Failed to provision link for {req.rule_id}: {e}", exc_info=True)
-                    req.set_status(status=RequestStatus.RETRY, session=session)
+                    req.mark_retry(f"Provisioning failed: {e}", session=session)

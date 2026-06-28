@@ -126,7 +126,8 @@ class SENSEHandlerDaemon(DaemonBase):
                     req.set_status(target_status, session=session)
                 else:
                     logging.warning(f"Request {req.rule_id} has reached max SENSE retries. Marking as failed.")
-                    req.set_status(RequestStatus.FAILED, session=session)
+                    last_error = req.failure_reason or "unknown error"
+                    req.mark_failed(f"Reached max SENSE retries ({req.sense_retries}). Last error: {last_error}", session=session)
                     release_endpoints_and_addresses(req, session)
             
             if req.sense_uuid is None:
@@ -165,7 +166,7 @@ class SENSEHandlerDaemon(DaemonBase):
                     f"Request {req.rule_id} reached CREATE_FAILED after being PROVISIONED; "
                     "marking as RETRY to re-enter SENSE retry flow"
                 )
-                req.set_status(RequestStatus.RETRY, session=session)
+                req.mark_retry(f"Circuit reached {status} after being PROVISIONED", session=session)
 
             elif (
                 req.transfer_status == RequestStatus.STALE

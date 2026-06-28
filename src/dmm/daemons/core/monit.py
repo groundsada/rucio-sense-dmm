@@ -1,21 +1,16 @@
-import requests
-import re
 import logging
-
-from dmm.daemons.base import DaemonBase
 from datetime import datetime
 
+from dmm.daemons.base import DaemonBase
 from dmm.models.request import Request, RequestStatus
 from dmm.db.session import databased
+from dmm.core.monit import PrometheusUtils
 
-from dmm.core.config import config_get
 
 class MonitDaemon(DaemonBase):
     def __init__(self, frequency, **kwargs):
         super().__init__(frequency, **kwargs)
-        self.prometheus_user = config_get("prometheus", "user")
-        self.prometheus_pass = config_get("prometheus", "password")
-        self.prometheus_host = config_get("prometheus", "host")
+        self.prometheus = PrometheusUtils()
 
     def process(self, **kwargs):
         self.run_once(**kwargs)
@@ -35,107 +30,59 @@ class MonitDaemon(DaemonBase):
                     logging.warning(f"Request {req.rule_id} has no source endpoint, skipping monitoring")
                     continue
 
-                bytes_now = self.get_all_bytes_at_t(current_timestamp, req.src_endpoint.ip_range)
+                bytes_now = self._get_all_bytes_at_t(current_timestamp, req.src_endpoint.ip_range)
 
                 if req.prometheus_bytes is None:
                     req.set_prometheus_metrics(bytes_transferred=bytes_now, session=session)
                     continue
 
-                throughput = self.calculate_throughput(bytes_now, req.prometheus_bytes)
-                req.set_prometheus_metrics(throughput=throughput, bytes_transferred=bytes_now, session=session)
+                throughput_mbps = self._calculate_throughput_mbps(bytes_now, req.prometheus_bytes)
+                req.set_prometheus_metrics(throughput=throughput_mbps, bytes_transferred=bytes_now, session=session)
 
-                health_status = self.determine_health_status(throughput, req.allocated_bandwidth_mbps)
+                health_status = self._determine_health_status(throughput_mbps, req.allocated_bandwidth_mbps)
                 req.set_health(health_status, session=session)
-                
+
             except Exception as e:
                 logging.error(f"Error monitoring request {req.rule_id}: {e}", exc_info=True)
                 continue
 
-    def calculate_throughput(self, bytes_now, prometheus_bytes):
-        if self.frequency <= 0:
-            logging.error("Monitoring frequency is 0 or negative, cannot calculate throughput")
-            return 0.0
-        # Calculate throughput in Gbps
-        byte_diff = bytes_now - prometheus_bytes
-        if byte_diff < 0:
-            logging.warning(f"Negative byte difference detected: {byte_diff}, resetting to 0")
-            byte_diff = 0
-        return round(byte_diff / self.frequency / 1024 / 1024 / 1024 * 8, 2)
-
-    def determine_health_status(self, throughput, bandwidth):
-        if bandwidth is None or bandwidth <= 0:
-            return "0"  # Unknown/unhealthy if no bandwidth allocated
-        # Throughput should be at least 80% of allocated bandwidth
-        return "1" if throughput >= 0.8 * bandwidth else "0"
-
-    def submit_query(self, query_dict) -> dict:
-        endpoint = "api/v1/query"
-        query_addr = f"{self.prometheus_host}/{endpoint}"
-        try:
-            response = requests.get(
-                query_addr,
-                params=query_dict,
-                auth=(self.prometheus_user, self.prometheus_pass),
-                timeout=15,
-            )
-            response.raise_for_status()
-            return response.json()
-        except requests.RequestException as e:
-            logging.error(f"Prometheus query request failed for {query_addr}: {e}", exc_info=True)
-            raise
-        except ValueError as e:
-            logging.error(f"Prometheus query returned invalid JSON for {query_addr}: {e}", exc_info=True)
-            raise
-    
-    @staticmethod
-    def get_val_from_response(response):
-        try:
-            return response["data"]["result"][0]["value"][1]
-        except (KeyError, IndexError, TypeError) as e:
-            raise ValueError(f"Invalid Prometheus response format: {response}") from e
-                
-    def get_interfaces(self, ipv6) -> str:
-        ipv6_pattern = f"{ipv6[:-3]}[0-9a-fA-F]{{1,4}}"
-        query = f"node_network_address_info{{address=~'{ipv6_pattern}'}}"
-        response = self.submit_query({"query": query})
-
-        interfaces = []
-        if response.get("status") == "success":
-            for metric in response.get("data", {}).get("result", []):
-                metric_data = metric.get("metric", {}) if isinstance(metric, dict) else {}
-                address = metric_data.get("address")
-                if address and re.match(ipv6_pattern, address):
-                    interfaces.append(
-                        (
-                            metric_data.get("device"),
-                            metric_data.get("instance"),
-                            metric_data.get("job"),
-                            metric_data.get("sitename"),
-                        )
-                    )
-        return interfaces
-
-    def get_all_bytes_at_t(self, time, ipv6) -> float:
-        transfers = self.get_interfaces(ipv6)
+    def _get_all_bytes_at_t(self, time, ipv6) -> float:
+        transfers = self.prometheus.get_interfaces(ipv6)
         if not transfers:
             logging.warning(f"No interfaces found for IPv6 {ipv6}")
             return 0.0
-            
-        total_bytes = 0
+
+        total_bytes = 0.0
         for transfer in transfers:
             try:
                 device, instance, job, sitename = transfer[0], transfer[1], transfer[2], transfer[3]
-                query_params = f"device=\"{device}\",instance=\"{instance}\",job=\"{job}\",sitename=\"{sitename}\""
+                query_params = f'device="{device}",instance="{instance}",job="{job}",sitename="{sitename}"'
                 metric = f"node_network_transmit_bytes_total{{{query_params}}}"
-
-                response = self.submit_query({"query": metric, "time": time})
+                response = self.prometheus.submit_query({"query": metric, "time": time})
                 if response.get("status") == "success" and response.get("data", {}).get("result"):
-                    bytes_at_t = self.get_val_from_response(response)
+                    bytes_at_t = PrometheusUtils.get_val_from_response(response)
                     total_bytes += float(bytes_at_t)
                 else:
                     logging.warning(f"Query {metric} returned no data")
             except Exception as e:
-                logging.error(f"Error querying bytes for interface {device}: {e}", exc_info=True)
+                logging.error(f"Error querying bytes for interface {transfer[0]}: {e}", exc_info=True)
                 continue
-                
+
         return total_bytes
+
+    def _calculate_throughput_mbps(self, bytes_now, prometheus_bytes) -> float:
+        if self.frequency <= 0:
+            logging.error("Monitoring frequency is 0 or negative, cannot calculate throughput")
+            return 0.0
+        byte_diff = bytes_now - prometheus_bytes
+        if byte_diff < 0:
+            logging.warning(f"Negative byte difference detected: {byte_diff}, resetting to 0")
+            byte_diff = 0
+        # Convert bytes/s → Mbps
+        return round(byte_diff / self.frequency / 1024 / 1024 * 8, 2)
+
+    @staticmethod
+    def _determine_health_status(throughput_mbps, bandwidth_mbps) -> str:
+        if bandwidth_mbps is None or bandwidth_mbps <= 0:
+            return "0"
+        return "1" if throughput_mbps >= 0.8 * bandwidth_mbps else "0"
