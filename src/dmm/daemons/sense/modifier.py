@@ -12,6 +12,7 @@ from dmm.core.sense import (
     modify_link,
     cancel_link,
     delete_instance,
+    get_instance_status,
     is_ready_for_modify,
     is_being_modified,
     is_modify_failed,
@@ -143,20 +144,30 @@ class SENSEModifierDaemon(DaemonBase):
                         "Cancelling and deleting the failed instance to rebuild from scratch."
                     )
                     failed_uuid = req.sense_uuid
-                    try:
-                        cancel_link(failed_uuid, status)
-                        delete_instance(failed_uuid)
-                        logging.info(
-                            f"Successfully cancelled and deleted MODIFY-FAILED instance "
-                            f"{failed_uuid} for {req.rule_id}"
+                    # Before attempting cancel/delete, check if SENSE has already cleaned up
+                    # this circuit (e.g., auto-cancelled after the modify rejection).
+                    # If so, skip the cancel/delete and go straight to the ALLOCATED reset.
+                    current_sense_status = get_instance_status(failed_uuid)
+                    if current_sense_status == "UNKNOWN":
+                        logging.warning(
+                            f"Circuit {failed_uuid} is already gone from SENSE (status=UNKNOWN) "
+                            f"— skipping cancel/delete, resetting {req.rule_id} to ALLOCATED"
                         )
-                    except Exception as e:
-                        logging.error(
-                            f"Failed to cancel/delete MODIFY-FAILED instance {failed_uuid} "
-                            f"for {req.rule_id}: {e} — will retry next cycle",
-                            exc_info=True,
-                        )
-                        continue
+                    else:
+                        try:
+                            cancel_link(failed_uuid, status)
+                            delete_instance(failed_uuid)
+                            logging.info(
+                                f"Successfully cancelled and deleted MODIFY-FAILED instance "
+                                f"{failed_uuid} for {req.rule_id}"
+                            )
+                        except Exception as e:
+                            logging.error(
+                                f"Failed to cancel/delete MODIFY-FAILED instance {failed_uuid} "
+                                f"for {req.rule_id}: {e} — will retry next cycle",
+                                exc_info=True,
+                            )
+                            continue
                     req.update({
                         "sense_uuid": None,
                         "sense_src_uri": None,

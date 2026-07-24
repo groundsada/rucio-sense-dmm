@@ -86,6 +86,7 @@ class AllocatorDaemon(DaemonBase):
                     "transfer_status": RequestStatus.PROVISIONED
                 }, session=session)
                 req_fin.set_status(status=RequestStatus.DELETED, session=session)
+                session.commit()  # commit reuse atomically before continuing loop — prevents a later session.rollback() from erasing this request's writes
                 claimed_rule_ids.add(req_fin.rule_id)
                 return True
 
