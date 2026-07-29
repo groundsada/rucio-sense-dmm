@@ -1,4 +1,5 @@
 import logging
+from datetime import datetime
 
 from dmm.daemons.base import DaemonBase
 
@@ -6,7 +7,7 @@ from dmm.db.session import databased
 from dmm.models.request import Request, RequestStatus, SenseCircuitStatus
 from dmm.models.mesh import Mesh
 
-from dmm.core.config import config_get
+from dmm.core.config import config_get, config_get_int
 from dmm.core.utils import is_sync_timeout
 from dmm.core.sense import (
     modify_link,
@@ -74,6 +75,17 @@ class SENSEModifierDaemon(DaemonBase):
                 )
                 req.set_status(status=RequestStatus.DELETED, session=session)
                 continue
+
+            # Hold in FINISHED_R for a configurable grace period to allow circuit reuse
+            finished_r_hold_secs = config_get_int("sense", "finished_r_hold_seconds", default=120, constraint="nonneg")
+            if req.rucio_finished_at is not None:
+                elapsed = (datetime.now() - req.rucio_finished_at).total_seconds()
+                if elapsed < finished_r_hold_secs:
+                    logging.debug(
+                        f"Request {req.rule_id} entered FINISHED_R {elapsed:.0f}s ago, "
+                        f"holding for {finished_r_hold_secs}s before throttle/teardown"
+                    )
+                    continue
 
             try:
                 vlan_range = Mesh.get_vlan_range(site_1=req.src_site, site_2=req.dst_site, session=session)
