@@ -113,7 +113,7 @@ class SENSEHandlerDaemon(DaemonBase):
 
     @databased
     def run_once(self, session=None):
-        reqs = Request.get_by_status(statuses=[RequestStatus.RETRY, RequestStatus.STAGED, RequestStatus.PROVISIONED, RequestStatus.CANCELED, RequestStatus.STALE, RequestStatus.DECIDED], session=session)
+        reqs = Request.get_by_status(statuses=[RequestStatus.RETRY, RequestStatus.STAGED, RequestStatus.PROVISIONED, RequestStatus.CANCELED, RequestStatus.STALE, RequestStatus.DECIDED, RequestStatus.FINISHED_R], session=session)
         if not reqs:
             return
         
@@ -181,6 +181,20 @@ class SENSEHandlerDaemon(DaemonBase):
                     f"({prev_circuit_status} → {status}), marking as PROVISIONED"
                 )
                 req.set_status(RequestStatus.PROVISIONED, session=session)
+
+            elif (
+                req.transfer_status == RequestStatus.FINISHED_R
+                and is_being_modified(prev_circuit_status)
+                and is_ready_for_modify(status)
+            ):
+                # The modifier submitted a throttle (to 1 Gbps) for this finished request
+                # and set MODIFY_COMMITTING.  SENSE has now confirmed the throttle was applied
+                # (circuit back in READY state).  Safe to mark FINISHED so the canceller proceeds.
+                logging.info(
+                    f"Request {req.rule_id} throttle modification confirmed "
+                    f"({prev_circuit_status} → {status}), marking as FINISHED"
+                )
+                req.set_status(RequestStatus.FINISHED, session=session)
 
             elif req.transfer_status == RequestStatus.PROVISIONED and is_modify_failed(status):
                 # A modification entered MODIFY - FAILED while the request was already

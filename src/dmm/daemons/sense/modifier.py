@@ -104,17 +104,23 @@ class SENSEModifierDaemon(DaemonBase):
                     vlan_range=vlan_range,
                     rule_id=req.rule_id
                 )
-                req.set_status(status=RequestStatus.FINISHED, session=session)
-                logging.info(f"Set request {req.rule_id} to FINISHED")
+                req.set_sense_circuit_status(
+                    status=SenseCircuitStatus.MODIFY_COMMITTING.value, session=session
+                )
+                logging.info(
+                    f"Submitted throttle for {req.rule_id}, waiting for SENSE MODIFY-READY before marking FINISHED"
+                )
             except Exception as e:
                 if is_sync_timeout(e):
                     logging.warning(
                         f"Throttle of finished request {req.rule_id} timed out (504); "
-                        "treating as applied, marking FINISHED"
+                        "marking MODIFY_COMMITTING, waiting for SENSE MODIFY-READY before FINISHED"
                     )
-                    req.set_status(status=RequestStatus.FINISHED, session=session)
+                    req.set_sense_circuit_status(
+                        status=SenseCircuitStatus.MODIFY_COMMITTING.value, session=session
+                    )
                 else:
-                    logging.error(f"Failed to set request {req.rule_id} to FINISHED: {e}", exc_info=True)
+                    logging.error(f"Failed to throttle {req.rule_id}: {e}", exc_info=True)
 
         for req in reqs_stale:
             # Skip this specific request if it's already being modified
