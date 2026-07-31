@@ -33,6 +33,8 @@ class SenseCircuitStatus(str, Enum):
     MODIFY_COMMITTED   = "MODIFY - COMMITTED"
     MODIFY_FAILED      = "MODIFY - FAILED"
     REINSTATE_READY    = "REINSTATE - READY"
+    CANCEL_COMMITTING  = "CANCEL - COMMITTING"
+    CANCEL_COMMITTED   = "CANCEL - COMMITTED"
     CANCEL_READY       = "CANCEL - READY"
 
 class Request(ModelBase, table=True):
