@@ -123,7 +123,11 @@ async def metrics(session=None):
             "dst_site": req.dst_site.name if req.dst_site else "UNKNOWN",
         }
 
+        # Rucio's own site names go on the info metric only, to keep the label
+        # sets of the numeric gauges unchanged.
         info_labels = dict(labels)
+        info_labels["src_rse"] = req.src_logical_site or labels["src_site"]
+        info_labels["dst_rse"] = req.dst_logical_site or labels["dst_site"]
         reason = req.failure_reason or ""
         # Keep label value bounded — full reason lives on the dashboard/details page.
         if len(reason) > 256:
