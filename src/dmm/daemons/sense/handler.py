@@ -142,12 +142,17 @@ class SENSEHandlerDaemon(DaemonBase):
 
             # Affiliate endpoints when ready
             if not req.sense_affiliated and is_affiliated_state(status):
+                if not req.src_pool_site or not req.dst_pool_site:
+                    logging.error(
+                        f"Request {req.rule_id} has no source/destination site, cannot affiliate endpoints"
+                    )
+                    continue
                 logging.debug(f"Request {req.rule_id} is not affiliated with SENSE instance {req.sense_uuid}, affiliating now.")
                 try:
                     affiliate_endpoints(
                         sense_uuid=req.sense_uuid,
-                        src_site_name=req.src_site.name,
-                        dst_site_name=req.dst_site.name,
+                        src_pool_site=req.src_pool_site,
+                        dst_pool_site=req.dst_pool_site,
                         rule_id=req.rule_id,
                         sense_src_uri=req.sense_src_uri,
                         sense_dst_uri=req.sense_dst_uri
