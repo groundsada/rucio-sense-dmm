@@ -189,9 +189,9 @@ async def handle_client(rule_id: str, session=None):
 async def get_dmm_status(request: Request, session=None):
     try:
         reqs = DBRequest.get_all(session=session)
-        return templates.TemplateResponse("index.html", {"request": request, "data": reqs})
+        return templates.TemplateResponse(request, "index.html", {"data": reqs})
     except Exception as e:
-        logging.error(e)
+        logging.error(e, exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")
 
 @api.get("/sites")
@@ -199,9 +199,9 @@ async def get_dmm_status(request: Request, session=None):
 async def get_sites(request: Request, session=None):
     try:
         sites = Site.get_all(session=session)
-        return templates.TemplateResponse("sites.html", {"request": request, "data": sites})
+        return templates.TemplateResponse(request, "sites.html", {"data": sites})
     except Exception as e:
-        logging.error(e)
+        logging.error(e, exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")
 
 @api.get("/details/{rule_id}")
@@ -209,9 +209,9 @@ async def get_sites(request: Request, session=None):
 async def open_rule_details(request: Request, rule_id: str, session=None):
     try:
         req = DBRequest.get_by_id(rule_id, session=session, use_lock=False)
-        return templates.TemplateResponse("details.html", {"request": request, "data": req})
+        return templates.TemplateResponse(request, "details.html", {"data": req})
     except Exception as e:
-        logging.error(e)
+        logging.error(e, exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")
 
 @api.post("/mark_finished")

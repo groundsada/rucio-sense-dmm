@@ -12,6 +12,7 @@ db_name=dmm
 [sense]
 profile_uuid=
 sense_keep_alive_seconds=60
+finished_r_hold_seconds=120
 
 [prometheus]
 host=
