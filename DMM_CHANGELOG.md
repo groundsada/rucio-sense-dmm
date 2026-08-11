@@ -9,7 +9,7 @@
 **Author:** Xi Yang (xiyang@es.net)  
 **Commit:** `5a3dfd9`  
 **Files:** `src/dmm/core/sitemap.py` (new), `src/dmm/core/allocation.py`, `src/dmm/daemons/core/allocator.py`, `src/dmm/daemons/rucio/initializer.py`, `src/dmm/daemons/sense/handler.py`, `src/dmm/models/request.py`, templates, `dmm.cfg.sample`  
-**Status:** Implemented — requires DB migration
+**Status:** Implemented
 
 ### Problem
 
@@ -57,13 +57,6 @@ Requests predating this feature have `src_logical_site = NULL`; the property fal
 **`src/dmm/daemons/sense/handler.py`** — `affiliate_endpoints` called with `src_pool_site`/`dst_pool_site` instead of `src_site.name`/`dst_site.name`.
 
 **`dmm.cfg.sample`** — new `[site-aliases]` section (commented example: `T2_US_UCSD_Blackhole=T2_US_UCSD`).
-
-### DB Migration Required
-
-```sql
-ALTER TABLE request ADD COLUMN src_logical_site VARCHAR;
-ALTER TABLE request ADD COLUMN dst_logical_site VARCHAR;
-```
 
 ### Before / After
 
