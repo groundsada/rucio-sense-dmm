@@ -50,6 +50,11 @@ commit message, branch name or PR title.
 Good: `fix: separate monit query failure from zero bytes`
 Bad: `Fix: Separate monit query failure from zero bytes (generated with Claude)`
 
+Open the PR yourself with `gh pr create`. Do not rely on the "Create PR" link
+in the run summary: it prefills a body crediting Claude Code, which violates the
+rule above. Write the PR title and body in the same style as a commit message —
+plain, factual, no AI attribution, and state anything you could not verify.
+
 This is a fork. `origin` is the fork, `upstream` is
 `aashayarora/rucio-sense-dmm`. Keep diffs minimal and in the surrounding style,
 because they may be PR'd upstream later.

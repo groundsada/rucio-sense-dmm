@@ -50,6 +50,9 @@ jobs:
           anthropic_api_key: ${{ secrets.NRP_AUTH_TOKEN }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
           branch_prefix: claude/
+          # Commits are attributed to the repo owner, not claude[bot].
+          bot_name: groundsada
+          bot_id: "65513692"
 
           claude_args: |
             --model glm-5
