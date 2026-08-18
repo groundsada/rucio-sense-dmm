@@ -37,6 +37,13 @@ class MonitDaemon(DaemonBase):
 
                 bytes_now = self.get_all_bytes_at_t(current_timestamp, req.src_endpoint.ip_range)
 
+                # A scrape gap must not corrupt the byte counter or flip
+                # health: when the lookup failed, leave the previous
+                # prometheus_bytes and health untouched and skip this cycle.
+                if bytes_now is None:
+                    logging.warning(f"Request {req.rule_id}: prometheus scrape failed, skipping cycle")
+                    continue
+
                 if req.prometheus_bytes is None:
                     req.set_prometheus_metrics(bytes_transferred=bytes_now, session=session)
                     continue
@@ -115,13 +122,23 @@ class MonitDaemon(DaemonBase):
                     )
         return interfaces
 
-    def get_all_bytes_at_t(self, time, ipv6) -> float:
+    def get_all_bytes_at_t(self, time, ipv6) -> float | None:
+        """
+        Returns the total number of bytes transmitted from a given Rucio RSE via
+        a given ipv6 address at the given time.
+
+        Returns None when the scrape failed (no interface found, or every
+        per-interface query returned no data) so callers can distinguish a scrape
+        gap from a genuine zero. A partial scrape (some interfaces succeed,
+        others fail) still returns a number.
+        """
         transfers = self.get_interfaces(ipv6)
         if not transfers:
             logging.warning(f"No interfaces found for IPv6 {ipv6}")
-            return 0.0
-            
-        total_bytes = 0
+            return None
+
+        total_bytes = 0.0
+        scraped = 0
         for transfer in transfers:
             try:
                 device, instance, job, sitename = transfer[0], transfer[1], transfer[2], transfer[3]
@@ -132,10 +149,14 @@ class MonitDaemon(DaemonBase):
                 if response.get("status") == "success" and response.get("data", {}).get("result"):
                     bytes_at_t = self.get_val_from_response(response)
                     total_bytes += float(bytes_at_t)
+                    scraped += 1
                 else:
                     logging.warning(f"Query {metric} returned no data")
             except Exception as e:
                 logging.error(f"Error querying bytes for interface {device}: {e}", exc_info=True)
                 continue
-                
+
+        if scraped == 0:
+            logging.warning(f"All per-interface byte queries failed for IPv6 {ipv6}")
+            return None
         return total_bytes
