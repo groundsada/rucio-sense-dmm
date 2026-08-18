@@ -31,7 +31,7 @@ jobs:
     runs-on: ubuntu-latest
     # NRP is a shared, rate-limited gateway and can stall before the first
     # token. Cap the job so a stall fails visibly instead of hanging.
-    timeout-minutes: 25
+    timeout-minutes: 50
     permissions:
       # Write, so it can push a branch and open a PR. It must never push to
       # main; CLAUDE.md says so and main should carry a branch protection rule
