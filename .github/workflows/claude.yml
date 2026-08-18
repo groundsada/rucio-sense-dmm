@@ -50,15 +50,10 @@ jobs:
           anthropic_api_key: ${{ secrets.NRP_AUTH_TOKEN }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
           branch_prefix: claude/
-          # Attribute git operations to the repo owner rather than claude[bot],
-          # so the history reads as theirs. Commit message conventions are in
-          # CLAUDE.md.
-          bot_name: groundsada
-          bot_id: "65513692"
 
           claude_args: |
             --model glm-5
-            --max-turns 60
+            --max-turns 30
             --allowedTools "Read,Edit,Write,Grep,Glob,Bash(git checkout:*),Bash(git switch:*),Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(git status:*),Bash(git log:*),Bash(git diff:*),Bash(git show:*),Bash(gh pr create:*),Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh issue view:*),Bash(gh issue list:*),Bash(gh issue edit:*),Bash(gh label list:*),mcp__github_inline_comment__create_inline_comment"
 
           settings: |
