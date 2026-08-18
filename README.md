@@ -21,6 +21,8 @@ DMM requires the following configuration files:
 3. **X.509 Certificates**: Host certificate and key (`hostcert.pem`, `hostcert.key.pem`)
 4. **`.sense-o-auth.yaml`**: SENSE OAuth credentials
 
+> **Note:** The `[prometheus] host` setting in `dmm.cfg` must point at a Prometheus instance where each site's DTN exporters carry a `sitename` label matching the SENSE site name. MonitDaemon relies on this label to map network interfaces to sites; if it is missing or mismatched, MonitDaemon reports health 0 for circuits that are actually healthy.
+
 ## Deployment
 
 ### Option 1: Kubernetes (Recommended for Production)
