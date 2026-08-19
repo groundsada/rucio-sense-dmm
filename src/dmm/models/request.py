@@ -145,6 +145,16 @@ class Request(ModelBase, table=True):
         return list(session.exec(statement).all())
 
     @classmethod
+    def get_live_endpoint_ids(cls, session=None):
+        """Endpoint ids still owned by a request that has not reached a terminal state."""
+        statement = select(cls.src_endpoint_, cls.dst_endpoint_).where(
+            cls.transfer_status.notin_(cls.TERMINAL_STATUSES))
+        ids = set()
+        for src, dst in session.exec(statement).all():
+            ids.update(i for i in (src, dst) if i is not None)
+        return ids
+
+    @classmethod
     def get_by_id(cls, rule_id: str, session=None, use_lock: bool = True):
         logging.debug(f"REQUEST QUERY: rule_id={rule_id}, locked={use_lock}")
         statement = select(cls).where(cls.rule_id == rule_id)

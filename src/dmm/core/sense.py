@@ -9,6 +9,7 @@ import ipaddress
 
 
 from sense.client.workflow_combined_api import WorkflowCombinedApi
+from dmm.core.metrics import timed_sense_call
 from dmm.models.request import SenseCircuitStatus
 
 def _good_response(response):
@@ -21,6 +22,7 @@ def _good_response(response):
             return False
     return not any("error" in str(r).lower() for r in response)
 
+@timed_sense_call("get_instance_status")
 def get_instance_status(sense_uuid):
     """
     Get the status of a SENSE instance.
@@ -34,6 +36,7 @@ def get_instance_status(sense_uuid):
     workflow_api = WorkflowCombinedApi()
     return workflow_api.instance_get_status(si_uuid=sense_uuid) or "UNKNOWN"
 
+@timed_sense_call("stage_link")
 def stage_link(profile_uuid, src_site, dst_site, src_ip_range, dst_ip_range, vlan_range, rule_id):
     """
     Stage a new SENSE link by creating a new instance.
@@ -187,6 +190,7 @@ def _match_uris_to_endpoints(extract_results, src_ip_range, dst_ip_range):
     dst_uri = (extract_results[1] or {}).get("ipv6_subnet_uri")
     return src_uri, dst_uri
 
+@timed_sense_call("provision_link")
 def provision_link(sense_uuid, profile_uuid, bandwidth_mbps, src_site, dst_site, 
                    src_ip_range, dst_ip_range, vlan_range, rule_id):
     """
@@ -239,6 +243,7 @@ def provision_link(sense_uuid, profile_uuid, bandwidth_mbps, src_site, dst_site,
         logging.error(f"Failed to provision request {rule_id}: {e}")
         raise
 
+@timed_sense_call("modify_link")
 def modify_link(sense_uuid, profile_uuid, bandwidth_mbps, src_site, dst_site,
                 src_ip_range, dst_ip_range, vlan_range, rule_id):
     """
@@ -288,6 +293,7 @@ def modify_link(sense_uuid, profile_uuid, bandwidth_mbps, src_site, dst_site,
         logging.error(f"Failed to modify request {rule_id}: {e}")
         raise
 
+@timed_sense_call("cancel_link")
 def cancel_link(sense_uuid, status=None):
     """
     Cancel a SENSE link.
@@ -304,6 +310,7 @@ def cancel_link(sense_uuid, status=None):
     response = workflow_api.instance_operate("cancel", si_uuid=sense_uuid, sync="true", force=str(force_cancel).lower())
     return response
 
+@timed_sense_call("delete_instance")
 def delete_instance(sense_uuid):
     """
     Delete a SENSE instance.

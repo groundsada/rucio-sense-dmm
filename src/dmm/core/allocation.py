@@ -14,6 +14,7 @@ from sense.client.workflow_combined_api import WorkflowCombinedApi
 from dmm.models.site import Site
 from dmm.models.mesh import Mesh
 from dmm.models.endpoint import Endpoint
+from dmm.core.metrics import ADDRESS_FREE_FAILURES, timed_sense_call
 from dmm.core.rucio import list_rses, get_rse_protocol
 from dmm.core.config import config_get
 from dmm.core.sitemap import physical_site_candidates
@@ -41,6 +42,7 @@ def subnet_pool_name(pool_site):
     """
     return f"RUCIO_Site_BGP_Subnet_Pool-{pool_site}"
 
+@timed_sense_call("allocate_address")
 def allocate_address(pool_site, alloc_name):
     """
     Allocate an IPv6 address from SENSE-O address pool.
@@ -74,6 +76,7 @@ def allocate_address(pool_site, alloc_name):
             )
         raise
 
+@timed_sense_call("free_address")
 def free_address(pool_site, alloc_name):
     """
     Free an IPv6 address allocation from SENSE-O.
@@ -99,9 +102,12 @@ def free_address(pool_site, alloc_name):
         logging.debug(f"Allocation {alloc_name} freed from pool {pool_name}")
         return True
     except Exception as e:
+        # Each failure leaks one subnet from the pool, and nothing reconciles after.
+        ADDRESS_FREE_FAILURES.labels(str(pool_site)).inc()
         logging.error(f"free_address: {str(e)}")
         raise ValueError(f"Freeing allocation failed for pool {subnet_pool_name(pool_site)} and {alloc_name}")
 
+@timed_sense_call("affiliate_endpoints")
 def affiliate_endpoints(sense_uuid, src_pool_site, dst_pool_site, rule_id,
                         sense_src_uri, sense_dst_uri):
     """
@@ -148,6 +154,7 @@ def format_ipv6_compressed(ip_range):
     """
     return ipaddress.IPv6Network(ip_range).compressed
 
+@timed_sense_call("get_site_uris")
 def get_site_uris(site_name):
     """
     Get the full URI and root URI for a given site from SENSE.
@@ -238,6 +245,7 @@ def get_link_capacity(site_info, vlan_range):
         logging.debug(f"Using default port capacity {port_capacity} for vlan range {vlan_range}")
         return port_capacity
 
+@timed_sense_call("get_endpoints_for_site")
 def get_endpoints_for_site(sense_uri, site_name):
     """
     Get the endpoints (IP ranges and hostnames) for a given site from SENSE.

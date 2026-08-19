@@ -11,6 +11,20 @@ from dmm.models.mesh import Mesh
 from dmm.db.session import databased
 from dmm.core.sense import is_circuit_active, is_being_provisioned
 
+def _max_capacity(a, b):
+    if a is None:
+        return b
+    if b is None:
+        return a
+    return max(a, b)
+
+def _edge_upper_bound(data):
+    bound = data.get('available_bandwidth', 1000)
+    capacity = data.get('link_capacity_mbps')
+    if capacity is not None:
+        bound = min(bound, capacity)
+    return bound
+
 class DeciderDaemon(DaemonBase):
     def __init__(self, frequency, **kwargs):
         super().__init__(frequency, **kwargs)
@@ -45,14 +59,17 @@ class DeciderDaemon(DaemonBase):
             return multi_graph
         for req in reqs:
             link_capacity_mbps = Mesh.get_link_capacity(req.src_site, req.dst_site, session=session)
-            multi_graph.add_node(req.src_site.name, link_capacity_mbps=link_capacity_mbps)
-            multi_graph.add_node(req.dst_site.name, link_capacity_mbps=link_capacity_mbps)
+            multi_graph.add_node(req.src_site.name)
+            multi_graph.add_node(req.dst_site.name)
+            # Capacity belongs to the site pair, so it goes on the edge. Writing it
+            # to the nodes gave every node whichever pair was processed last.
             multi_graph.add_edge(
                 req.src_site.name, req.dst_site.name,
                 rule_id=req.rule_id,
                 priority=req.priority or 0,  # guard against None priority
                 bandwidth=req.allocated_bandwidth_mbps,
                 available_bandwidth=req.available_bandwidth_mbps,
+                link_capacity_mbps=link_capacity_mbps,
             )
         return multi_graph
 
@@ -66,6 +83,7 @@ class DeciderDaemon(DaemonBase):
         for u, v, data in multi_graph.edges(data=True):
             priority = data['priority']
             available_bandwidth = data.get('available_bandwidth', 1000)
+            link_capacity_mbps = data.get('link_capacity_mbps')
             if simple_graph.has_edge(u, v):
                 simple_graph[u][v]['priority'] += priority
                 # The physical link capacity is fixed — take the max (not sum) so we
@@ -73,9 +91,20 @@ class DeciderDaemon(DaemonBase):
                 simple_graph[u][v]['available_bandwidth'] = max(
                     simple_graph[u][v]['available_bandwidth'], available_bandwidth
                 )
+                simple_graph[u][v]['link_capacity_mbps'] = _max_capacity(
+                    simple_graph[u][v]['link_capacity_mbps'], link_capacity_mbps
+                )
             else:
-                simple_graph.add_edge(u, v, priority=priority, available_bandwidth=available_bandwidth)
-        
+                simple_graph.add_edge(u, v, priority=priority, available_bandwidth=available_bandwidth,
+                                      link_capacity_mbps=link_capacity_mbps)
+
+        # A node terminates every link incident to it, so the most it can carry is
+        # the largest of those. Derived here rather than written per pair.
+        for node in simple_graph.nodes:
+            caps = [c for c in (simple_graph[node][nbr].get('link_capacity_mbps')
+                                for nbr in simple_graph[node]) if c is not None]
+            simple_graph.nodes[node]['link_capacity_mbps'] = max(caps) if caps else None
+
         return simple_graph, list(simple_graph.nodes), list(simple_graph.edges(data=True))
 
     def _prepare_optimization_matrices(self, simple_graph, nodes, edges) -> tuple:
@@ -90,13 +119,21 @@ class DeciderDaemon(DaemonBase):
             priority = data['priority']
             c[i] = -priority
         
-        A = nx.incidence_matrix(simple_graph, nodelist=nodes, edgelist=edges).toarray()
-        b = np.array([simple_graph.nodes[node]['link_capacity_mbps'] for node in nodes])
+        incidence = nx.incidence_matrix(simple_graph, nodelist=nodes, edgelist=edges).toarray()
+        node_capacities = [simple_graph.nodes[node].get('link_capacity_mbps') for node in nodes]
+        # A site with no known capacity gets no row at all, rather than a guess.
+        constrained = [i for i, capacity in enumerate(node_capacities) if capacity is not None]
+        if len(constrained) < len(nodes):
+            unknown = [nodes[i] for i in range(len(nodes)) if i not in constrained]
+            logging.warning(f"No link capacity known for {unknown}, leaving them unconstrained in the LP")
 
-        available_bandwidths = np.array([data['available_bandwidth'] for _, _, data in edges])
+        A_nodes = incidence[constrained]
+        b_nodes = np.array([node_capacities[i] for i in constrained], dtype=float)
 
-        A = np.vstack([A, np.eye(n_edges)])
-        b = np.concatenate([b, available_bandwidths])
+        edge_bounds = np.array([_edge_upper_bound(data) for _, _, data in edges], dtype=float)
+
+        A = np.vstack([A_nodes, np.eye(n_edges)])
+        b = np.concatenate([b_nodes, edge_bounds])
 
         return A, c, b, edge_index
 
@@ -184,19 +221,18 @@ class DeciderDaemon(DaemonBase):
         reqs_provisioned = Request.get_by_status(statuses=[RequestStatus.MODIFIED, RequestStatus.PROVISIONED, RequestStatus.DECIDED], session=session)
         for req in reqs_provisioned:
             allocated_bandwidth = None  # Initialize to prevent NameError
-            req_u = None  # source-node name on the multi_graph (needed for cap logic)
+            link_capacity = None  # capacity of this request's own link (needed for cap logic)
             for u, v, key, data in multi_graph.edges(keys=True, data=True):
                 if "rule_id" in data and data["rule_id"] == req.rule_id:
                     allocated_bandwidth = int(data["bandwidth"])
-                    req_u = u
+                    link_capacity = data.get("link_capacity_mbps")
                     break  # Found the matching edge, no need to continue
 
             if allocated_bandwidth is None:
                 logging.error(f"Could not find bandwidth allocation for request {req.rule_id} in multi_graph")
                 continue  # Skip this request, don't update it
 
-            if req_u is not None and allocated_bandwidth > (req.allocated_bandwidth_mbps or 0):
-                link_capacity = multi_graph.nodes[req_u].get('link_capacity_mbps', allocated_bandwidth)
+            if link_capacity is not None and allocated_bandwidth > (req.allocated_bandwidth_mbps or 0):
                 cotenant_statuses = [
                     RequestStatus.PROVISIONED, RequestStatus.STALE, RequestStatus.MODIFIED,
                     RequestStatus.DECIDED, RequestStatus.FINISHED, RequestStatus.FINISHED_R,

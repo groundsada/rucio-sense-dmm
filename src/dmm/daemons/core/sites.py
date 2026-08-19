@@ -1,6 +1,9 @@
+from time import time
+
 from dmm.daemons.base import DaemonBase
 from dmm.db.session import databased
 from dmm.core.allocation import refresh_all_sites
+from dmm.core.metrics import SITES_LAST_REFRESH
 
 class RefreshSiteDBDaemon(DaemonBase):
     def __init__(self, frequency, **kwargs):
@@ -16,3 +19,4 @@ class RefreshSiteDBDaemon(DaemonBase):
         Delegates to core/allocation.refresh_all_sites for the actual logic.
         """
         refresh_all_sites(client, session)
+        SITES_LAST_REFRESH.set(time())
