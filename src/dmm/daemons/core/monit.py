@@ -6,6 +6,10 @@ from dmm.models.request import Request, RequestStatus
 from dmm.db.session import databased
 from dmm.core.monit import PrometheusUtils
 
+# Mirrored by dmm_request_throughput_ratio, so alert rules can use their own
+# threshold without redeploying DMM.
+HEALTH_THROUGHPUT_RATIO = 0.8
+
 
 class MonitDaemon(DaemonBase):
     def __init__(self, frequency, **kwargs):
@@ -78,11 +82,11 @@ class MonitDaemon(DaemonBase):
         if byte_diff < 0:
             logging.warning(f"Negative byte difference detected: {byte_diff}, resetting to 0")
             byte_diff = 0
-        # Convert bytes/s → Mbps
-        return round(byte_diff / self.frequency / 1024 / 1024 * 8, 2)
+        # Convert bytes/s → Mbps. SENSE bandwidth is decimal, so 1000 not 1024.
+        return round(byte_diff / self.frequency / 1000 / 1000 * 8, 2)
 
     @staticmethod
     def _determine_health_status(throughput_mbps, bandwidth_mbps) -> str:
         if bandwidth_mbps is None or bandwidth_mbps <= 0:
             return "0"
-        return "1" if throughput_mbps >= 0.8 * bandwidth_mbps else "0"
+        return "1" if throughput_mbps >= HEALTH_THROUGHPUT_RATIO * bandwidth_mbps else "0"

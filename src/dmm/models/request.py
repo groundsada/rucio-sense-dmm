@@ -1,5 +1,6 @@
-from sqlmodel import Field, Relationship, select
+from sqlmodel import Field, Relationship, select, or_
 from typing import Optional, List, ClassVar
+from datetime import timedelta
 from enum import Enum
 
 import logging
@@ -119,6 +120,28 @@ class Request(ModelBase, table=True):
         statement = select(cls).where(cls.transfer_status.in_(statuses))
         if use_lock:
             statement = statement.with_for_update()
+        return list(session.exec(statement).all())
+
+    # Requests in these states never change again, so exporting them forever only
+    # grows the series count.
+    TERMINAL_STATUSES: ClassVar[List[str]] = [
+        RequestStatus.FAILED,
+        RequestStatus.CANCELED,
+        RequestStatus.DELETED,
+    ]
+
+    @classmethod
+    def get_for_metrics(cls, session=None, terminal_window_hours: int = 6, limit: int = 5000):
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=terminal_window_hours)
+        statement = (
+            select(cls)
+            .where(or_(
+                cls.transfer_status.notin_(cls.TERMINAL_STATUSES),
+                cls.updated_at >= cutoff,
+            ))
+            .order_by(cls.updated_at.desc())
+            .limit(limit)
+        )
         return list(session.exec(statement).all())
 
     @classmethod
