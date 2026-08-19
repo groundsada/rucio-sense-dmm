@@ -123,6 +123,14 @@ transfertool through DMM's allocation into SENSE-O. `etc/rucio.patch` injects
 that header; both halves tag the span with the rule id, and Rucio degrades to an
 unheadered request if OpenTelemetry is not installed there.
 
+`etc/rucio.patch` also adds two counters on the Rucio side, through the
+`MetricManager` already present in `transfertool/fts3.py`:
+`sense_routing_applied` and `sense_routing_skipped{reason}`, where reason is one
+of `no_rule_id`, `not_allocated`, `dmm_unreachable`, `invalid_response` or
+`no_endpoints_in_transfer`. Only Rucio can count these — DMM sees roughly one
+query per rule, never one per transfer — and without them a DMM outage looks
+like a healthy stack over which zero bytes rode a circuit.
+
 The daemons and the frontend report the same `service.name` under different
 `service.instance.id`. Tracing is configured **after** the frontend is forked,
 in each process separately: a `TracerProvider` built before the fork loses its

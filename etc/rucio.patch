@@ -22,11 +22,13 @@ diff --git a/lib/rucio/transfertool/fts3.py b/lib/rucio/transfertool/fts3.py
 index 52fbe587e..dd1660c57 100644
 --- a/lib/rucio/transfertool/fts3.py
 +++ b/lib/rucio/transfertool/fts3.py
-@@ -29,6 +29,14 @@ import requests
+@@ -29,6 +29,16 @@ import requests
  from dogpile.cache.api import NoValue
  from requests.adapters import ReadTimeout
  from requests.packages.urllib3 import disable_warnings  # pylint: disable=import-error
++from collections import OrderedDict
 +from contextlib import ExitStack
++from time import monotonic
 +from urllib.parse import urlparse, urlunparse
 +
 +try:
@@ -37,30 +39,75 @@ index 52fbe587e..dd1660c57 100644
  
  from rucio.common.cache import make_region_memcached
  from rucio.common.config import config_get, config_get_bool, config_get_int
-@@ -848,6 +856,96 @@ class FTS3Transfertool(Transfertool):
+@@ -848,6 +858,160 @@ class FTS3Transfertool(Transfertool):
  
          self.scitags_exp_id, self.scitags_activity_ids = _scitags_ids(logger=logger)
  
 +        # SENSE network routing configuration
 +        self.dmm_url = config_get('dmm', 'url', False, None)
 +        self.sense_activities = self._load_sense_activities() if self.dmm_url else set()
-+        self.dmm_cache = {}
++        self.dmm_cache = OrderedDict()
++
++    # DMM reallocates a rule's endpoints on a retry or a restage and has no way
++    # to tell Rucio, so an entry that never expires means rewriting transfers to
++    # a hostname that stopped being right some time ago. Bounded as well as
++    # expiring: the transfertool outlives any single rule.
++    DMM_CACHE_TTL = 300
++    DMM_CACHE_MAX_ENTRIES = 10000
++    # Failures are cached too, briefly. This same patch raises the DID cap to
++    # 50000, so one submission can carry thousands of files sharing a rule —
++    # without this, a rule DMM has not allocated yet costs one request per file,
++    # each able to burn the full 5s timeout. Kept short because the usual reason
++    # for a miss is that the allocator has not caught up yet, and this is how
++    # long routing stays off after it does.
++    DMM_CACHE_NEGATIVE_TTL = 10
++
++    # Only DMM's own metrics can say what it decided; only these can say how
++    # many transfers were actually routed. Without them a DMM outage looks like
++    # a healthy stack where zero bytes rode a circuit.
++    SENSE_ROUTING_APPLIED = METRICS.counter(
++        'sense_routing_applied',
++        documentation='Transfers rewritten to SENSE endpoints')
++    SENSE_ROUTING_SKIPPED = METRICS.counter(
++        'sense_routing_skipped',
++        labelnames=('reason',),
++        documentation='SENSE-eligible transfers that were not rewritten, by reason')
 +
 +    def _load_sense_activities(self) -> set[str]:
 +        """Load and normalize SENSE-eligible activities from configuration."""
 +        activities_str = config_get('dmm', 'activities', False, 'sense test')
 +        return {activity.strip().lower() for activity in activities_str.split(',')}
 +
-+    def _query_dmm(self, rule_id: str) -> Optional[dict[str, str]]:
++    def _query_dmm(self, rule_id: str) -> tuple[Optional[dict[str, str]], Optional[str]]:
 +        """
-+        Query DMM for SENSE network endpoints.
-+        
-+        :param rule_id: Rucio rule ID
-+        :returns: Dict with 'source' and 'destination' keys, or None on failure
-+        """
-+        if rule_id in self.dmm_cache:
-+            return self.dmm_cache[rule_id]
++        Query DMM for SENSE network endpoints, through a bounded expiring cache.
 +
++        A failed refresh is never papered over with the previous answer. Not
++        routing is the safe failure — the transfer still completes over the
++        default path — whereas rewriting to an endpoint DMM may have already
++        reallocated can fail it outright. It is also what already happens for a
++        rule that was never cached, so DMM being unreachable has one behaviour
++        rather than two.
++
++        :param rule_id: Rucio rule ID
++        :returns: (endpoints, skip_reason), exactly one of which is set
++        """
++        now = monotonic()
++        cached = self.dmm_cache.get(rule_id)
++        if cached is not None and now < cached[0]:
++            self.dmm_cache.move_to_end(rule_id)
++            return cached[1], cached[2]
++
++        data, reason = self._fetch_dmm(rule_id)
++        ttl = self.DMM_CACHE_TTL if reason is None else self.DMM_CACHE_NEGATIVE_TTL
++        self.dmm_cache[rule_id] = (now + ttl, data, reason)
++        self.dmm_cache.move_to_end(rule_id)
++        while len(self.dmm_cache) > self.DMM_CACHE_MAX_ENTRIES:
++            self.dmm_cache.popitem(last=False)
++        return data, reason
++
++    def _fetch_dmm(self, rule_id: str) -> tuple[Optional[dict[str, str]], Optional[str]]:
++        """One uncached call to DMM. Returns (endpoints, skip_reason)."""
 +        with ExitStack() as stack:
 +            headers: dict[str, str] = {}
 +            if otel_trace is not None:
@@ -84,15 +131,22 @@ index 52fbe587e..dd1660c57 100644
 +
 +                if not isinstance(data, dict) or 'source' not in data or 'destination' not in data:
 +                    self.logger(logging.WARNING, f"Invalid DMM response for {rule_id}")
-+                    return None
++                    return None, 'invalid_response'
 +
-+                self.dmm_cache[rule_id] = data
 +                self.logger(logging.DEBUG, f"DMM endpoints for {rule_id}: {data['source']} -> {data['destination']}")
-+                return data
++                return data, None
 +
 +            except requests.RequestException as e:
++                # A 404 is DMM saying the rule is not allocated yet, which is
++                # normal in the window between rule creation and the allocator
++                # reaching it. Anything else means DMM could not be reached,
++                # which is the one an operator has to see.
++                response = getattr(e, 'response', None)
++                if response is not None and response.status_code == 404:
++                    self.logger(logging.DEBUG, f"DMM has not allocated {rule_id} yet")
++                    return None, 'not_allocated'
 +                self.logger(logging.ERROR, f"DMM query failed for {rule_id}: {e}")
-+                return None
++                return None, 'dmm_unreachable'
 +
 +    def _replace_hostname(self, url: str, new_hostname: str) -> str:
 +        """
@@ -114,27 +168,39 @@ index 52fbe587e..dd1660c57 100644
 +            
 +            rule_id = file.get('metadata', {}).get('rule_id')
 +            if not rule_id:
++                self.SENSE_ROUTING_SKIPPED.labels(reason='no_rule_id').inc()
 +                continue
-+            
-+            endpoints = self._query_dmm(rule_id)
-+            if not endpoints:
++
++            endpoints, reason = self._query_dmm(rule_id)
++            if reason is not None:
++                self.SENSE_ROUTING_SKIPPED.labels(reason=reason).inc()
 +                continue
-+            
++
 +            # Apply SENSE endpoints
++            applied = False
 +            if file.get('sources'):
 +                old_src = file['sources'][0]
 +                file['sources'][0] = self._replace_hostname(old_src, endpoints['source'])
 +                self.logger(logging.INFO, f"SENSE routing {rule_id}: source {old_src} -> {file['sources'][0]}")
-+            
++                applied = True
++
 +            if file.get('destinations'):
 +                old_dst = file['destinations'][0]
 +                file['destinations'][0] = self._replace_hostname(old_dst, endpoints['destination'])
 +                self.logger(logging.INFO, f"SENSE routing {rule_id}: dest {old_dst} -> {file['destinations'][0]}")
++                applied = True
++
++            # DMM answered but the transfer had nothing to rewrite. Counted
++            # apart from a DMM failure because it is a different bug.
++            if applied:
++                self.SENSE_ROUTING_APPLIED.inc()
++            else:
++                self.SENSE_ROUTING_SKIPPED.labels(reason='no_endpoints_in_transfer').inc()
 +
      @classmethod
      def _pick_fts_servers(cls, source_rse: "RseData", dest_rse: "RseData"):
          """
-@@ -932,7 +1030,8 @@ class FTS3Transfertool(Transfertool):
+@@ -932,7 +1096,8 @@ class FTS3Transfertool(Transfertool):
                  'dest_rse_id': transfer.dst.rse.id,
                  'filesize': rws.byte_count,
                  'md5': rws.md5,
@@ -144,7 +210,7 @@ index 52fbe587e..dd1660c57 100644
              },
              'filesize': rws.byte_count,
              'checksum': checksum_to_use,
-@@ -958,6 +1057,9 @@ class FTS3Transfertool(Transfertool):
+@@ -958,6 +1123,9 @@ class FTS3Transfertool(Transfertool):
          for transfer in transfers:
              files.append(self._file_from_transfer(transfer, job_params))
  
