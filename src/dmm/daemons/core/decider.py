@@ -10,6 +10,16 @@ from dmm.models.request import Request, RequestStatus
 from dmm.models.mesh import Mesh
 from dmm.db.session import databased
 from dmm.core.sense import is_circuit_active, is_being_provisioned
+from dmm.core.metrics import (
+    DECIDER_INFEASIBLE,
+    DECIDER_ROUNDING_LOSS,
+    DECIDER_SOLVES_PER_CYCLE,
+    DECIDER_SOLVE_DURATION,
+    LINK_ALLOCATED,
+    LINK_CAPACITY,
+    MODIFY_CAPPED,
+    REQUESTED_BANDWIDTH,
+)
 
 def _max_capacity(a, b):
     if a is None:
@@ -34,9 +44,16 @@ class DeciderDaemon(DaemonBase):
     
     @databased
     def run_once(self, session=None):
+        # The graph is rebuilt from scratch every cycle, so drop the label sets
+        # from the last one rather than leaving departed links at a stale value.
+        LINK_CAPACITY.clear()
+        LINK_ALLOCATED.clear()
+        REQUESTED_BANDWIDTH.clear()
+
         multi_graph = self._build_multi_graph(session)
-        
+
         if not multi_graph.nodes:
+            DECIDER_ROUNDING_LOSS.set(0)
             return
 
         simple_graph, nodes, edges = self._simplify_graph(multi_graph)
@@ -44,9 +61,27 @@ class DeciderDaemon(DaemonBase):
         optim_result = self._optimize_bandwidth(A, b, c, edges)
 
         self._allocate_bandwidth(multi_graph, simple_graph, edges, edge_index, optim_result)
+        self._publish_graph(multi_graph, simple_graph)
 
         self._allocate_new_bandwidth(multi_graph, session)
         self._modify_existing_bandwidth(multi_graph, session)
+
+    def _publish_graph(self, multi_graph, simple_graph) -> None:
+        """
+        Export the graph the decision was made on, after allocation so the
+        allocated figure is the rounded one that actually reaches SENSE.
+        """
+        allocated = {}
+        for u, v, data in multi_graph.edges(data=True):
+            link = tuple(sorted((u, v)))
+            allocated[link] = allocated.get(link, 0) + (data.get('bandwidth') or 0)
+
+        for u, v, data in simple_graph.edges(data=True):
+            link = tuple(sorted((u, v)))
+            capacity = data.get('link_capacity_mbps')
+            if capacity is not None:
+                LINK_CAPACITY.labels(*link).set(capacity)
+            LINK_ALLOCATED.labels(*link).set(allocated.get(link, 0))
 
     def _build_multi_graph(self, session) -> nx.MultiGraph:
         """
@@ -145,30 +180,40 @@ class DeciderDaemon(DaemonBase):
         """
         n_edges = len(edges)
         precision_mbps = 5
+        solves = 0
 
-        # Verify a solution exists with lower_bound=0 before searching.
-        base_bounds = [(0, None)] * n_edges
-        base_result = linprog(c, A_ub=A, b_ub=b, bounds=base_bounds, method='highs')
-        if not base_result.success:
-            raise ValueError("No feasible solution found for the optimization problem.")
+        def solve(lower_bound):
+            nonlocal solves
+            solves += 1
+            with DECIDER_SOLVE_DURATION.time():
+                return linprog(c, A_ub=A, b_ub=b, bounds=[(lower_bound, None)] * n_edges,
+                               method='highs')
 
-        optim_result = base_result
+        try:
+            # Verify a solution exists with lower_bound=0 before searching.
+            base_result = solve(0)
+            if not base_result.success:
+                DECIDER_INFEASIBLE.inc()
+                raise ValueError("No feasible solution found for the optimization problem.")
 
-        # The highest any single edge can be floored is the minimum capacity constraint.
-        lo = 0
-        hi = int(np.min(b))
+            optim_result = base_result
 
-        while hi - lo > precision_mbps:
-            mid = (lo + hi) / 2
-            bounds = [(mid, None)] * n_edges
-            result = linprog(c, A_ub=A, b_ub=b, bounds=bounds, method='highs')
-            if result.success:
-                lo = mid
-                optim_result = result
-            else:
-                hi = mid
+            # The highest any single edge can be floored is the minimum capacity constraint.
+            lo = 0
+            hi = int(np.min(b))
 
-        return optim_result.x
+            while hi - lo > precision_mbps:
+                mid = (lo + hi) / 2
+                result = solve(mid)
+                if result.success:
+                    lo = mid
+                    optim_result = result
+                else:
+                    hi = mid
+
+            return optim_result.x
+        finally:
+            DECIDER_SOLVES_PER_CYCLE.observe(solves)
 
     def _allocate_bandwidth(self, multi_graph, simple_graph, edges, edge_index, bandwidths) -> None:
         """
@@ -179,6 +224,7 @@ class DeciderDaemon(DaemonBase):
         @param edge_index: the edge index mapping
         @param x: the optimization result
         """
+        rounding_loss = 0.0
         for u, v, key, data in multi_graph.edges(keys=True, data=True):
             total_priority = simple_graph[u][v]['priority']
             if total_priority > 0:
@@ -188,10 +234,15 @@ class DeciderDaemon(DaemonBase):
                 rounded_bandwidth = floor(bandwidth // 1000) * 1000
                 if bandwidth > 0 and rounded_bandwidth == 0:
                     rounded_bandwidth = 1000  # Minimum bandwidth
+                rounding_loss += max(0.0, bandwidth - rounded_bandwidth)
+                if data.get('rule_id'):
+                    # Sorted to match the link-level series, so the two can be joined.
+                    REQUESTED_BANDWIDTH.labels(data['rule_id'], *sorted((u, v))).set(bandwidth)
                 multi_graph[u][v][key]['bandwidth'] = rounded_bandwidth
             else:
                 logging.warning(f"Total priority is 0 for edge {u}->{v}, setting bandwidth to 0")
                 multi_graph[u][v][key]['bandwidth'] = 0
+        DECIDER_ROUNDING_LOSS.set(rounding_loss)
 
     def _allocate_new_bandwidth(self, multi_graph, session) -> None:
         """
@@ -222,10 +273,12 @@ class DeciderDaemon(DaemonBase):
         for req in reqs_provisioned:
             allocated_bandwidth = None  # Initialize to prevent NameError
             link_capacity = None  # capacity of this request's own link (needed for cap logic)
+            link = None
             for u, v, key, data in multi_graph.edges(keys=True, data=True):
                 if "rule_id" in data and data["rule_id"] == req.rule_id:
                     allocated_bandwidth = int(data["bandwidth"])
                     link_capacity = data.get("link_capacity_mbps")
+                    link = tuple(sorted((u, v)))
                     break  # Found the matching edge, no need to continue
 
             if allocated_bandwidth is None:
@@ -252,6 +305,7 @@ class DeciderDaemon(DaemonBase):
                 )
                 capped = int(min(allocated_bandwidth, link_capacity - reserved_by_others))
                 if capped != allocated_bandwidth:
+                    MODIFY_CAPPED.labels(*link).inc()
                     logging.info(
                         f"Capping upward MODIFY for {req.rule_id}: "
                         f"LP={allocated_bandwidth} → capped={capped} Mbps "

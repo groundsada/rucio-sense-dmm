@@ -65,6 +65,41 @@ ADDRESS_FREE_FAILURES = Counter(
 SITES_LAST_REFRESH = Gauge(
     "dmm_sites_last_refresh_timestamp_seconds", "Unix time of the last successful site database refresh")
 
+LINK_CAPACITY = Gauge(
+    "dmm_link_capacity_mbps", "Physical capacity of the link the decider solved against",
+    ["src", "dst"])
+
+LINK_ALLOCATED = Gauge(
+    "dmm_link_allocated_mbps", "Bandwidth the decider allocated across the link this cycle",
+    ["src", "dst"])
+
+DECIDER_SOLVE_DURATION = Histogram(
+    "dmm_decider_solve_duration_seconds", "Duration of a single linprog call",
+    buckets=(0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5, float("inf")))
+
+DECIDER_SOLVES_PER_CYCLE = Histogram(
+    "dmm_decider_solves_per_cycle",
+    "linprog calls in one decider cycle, all of them inside the process-wide lock",
+    buckets=(1, 2, 5, 10, 15, 20, 30, 50, float("inf")))
+
+DECIDER_INFEASIBLE = Counter(
+    "dmm_decider_infeasible_total",
+    "Cycles where the LP had no feasible solution, making the whole cycle a no-op")
+
+DECIDER_ROUNDING_LOSS = Gauge(
+    "dmm_decider_rounding_loss_mbps",
+    "Bandwidth discarded this cycle by rounding down to the 1000 Mbps quantum")
+
+REQUESTED_BANDWIDTH = Gauge(
+    "dmm_request_requested_bandwidth_mbps",
+    "Bandwidth the LP awarded a request before rounding, i.e. what was asked for",
+    ["rule_id", "src", "dst"])
+
+MODIFY_CAPPED = Counter(
+    "dmm_modify_capped_total",
+    "Upward MODIFYs clipped by capacity already reserved by co-tenant circuits",
+    ["src", "dst"])
+
 
 # Duplicated from core/utils rather than imported: core.utils imports core.allocation,
 # which imports this module, and the cycle would not resolve.
