@@ -22,15 +22,22 @@ diff --git a/lib/rucio/transfertool/fts3.py b/lib/rucio/transfertool/fts3.py
 index 52fbe587e..dd1660c57 100644
 --- a/lib/rucio/transfertool/fts3.py
 +++ b/lib/rucio/transfertool/fts3.py
-@@ -29,6 +29,7 @@ import requests
+@@ -29,6 +29,14 @@ import requests
  from dogpile.cache.api import NoValue
  from requests.adapters import ReadTimeout
  from requests.packages.urllib3 import disable_warnings  # pylint: disable=import-error
++from contextlib import ExitStack
 +from urllib.parse import urlparse, urlunparse
++
++try:
++    from opentelemetry import trace as otel_trace
++    from opentelemetry.propagate import inject as otel_inject
++except ImportError:  # tracing is optional, SENSE routing is not
++    otel_trace = otel_inject = None
  
  from rucio.common.cache import make_region_memcached
  from rucio.common.config import config_get, config_get_bool, config_get_int
-@@ -848,6 +849,80 @@ class FTS3Transfertool(Transfertool):
+@@ -848,6 +856,96 @@ class FTS3Transfertool(Transfertool):
  
          self.scitags_exp_id, self.scitags_activity_ids = _scitags_ids(logger=logger)
  
@@ -53,23 +60,39 @@ index 52fbe587e..dd1660c57 100644
 +        """
 +        if rule_id in self.dmm_cache:
 +            return self.dmm_cache[rule_id]
-+        
-+        try:
-+            response = requests.get(f'{self.dmm_url}/query/{rule_id}', timeout=5)
-+            response.raise_for_status()
-+            data = response.json()
-+            
-+            if not isinstance(data, dict) or 'source' not in data or 'destination' not in data:
-+                self.logger(logging.WARNING, f"Invalid DMM response for {rule_id}")
++
++        with ExitStack() as stack:
++            headers: dict[str, str] = {}
++            if otel_trace is not None:
++                # A traceparent is only emitted while a span is current, so the
++                # call is wrapped even though the transfertool keeps no span of
++                # its own. Without this DMM's /query starts a fresh trace with
++                # no parent and the two halves of the only cross-component story
++                # in this system — Rucio deciding a rule is SENSE-eligible, DMM
++                # allocating, SENSE-O programming the network — never join.
++                # With no tracing configured this is a non-recording span and
++                # inject writes nothing, so the request is unchanged.
++                span = stack.enter_context(
++                    otel_trace.get_tracer(__name__).start_as_current_span('rucio.query_dmm'))
++                span.set_attribute('dmm.rule_id', rule_id)
++                otel_inject(headers)
++
++            try:
++                response = requests.get(f'{self.dmm_url}/query/{rule_id}', headers=headers, timeout=5)
++                response.raise_for_status()
++                data = response.json()
++
++                if not isinstance(data, dict) or 'source' not in data or 'destination' not in data:
++                    self.logger(logging.WARNING, f"Invalid DMM response for {rule_id}")
++                    return None
++
++                self.dmm_cache[rule_id] = data
++                self.logger(logging.DEBUG, f"DMM endpoints for {rule_id}: {data['source']} -> {data['destination']}")
++                return data
++
++            except requests.RequestException as e:
++                self.logger(logging.ERROR, f"DMM query failed for {rule_id}: {e}")
 +                return None
-+            
-+            self.dmm_cache[rule_id] = data
-+            self.logger(logging.DEBUG, f"DMM endpoints for {rule_id}: {data['source']} -> {data['destination']}")
-+            return data
-+            
-+        except requests.RequestException as e:
-+            self.logger(logging.ERROR, f"DMM query failed for {rule_id}: {e}")
-+            return None
 +
 +    def _replace_hostname(self, url: str, new_hostname: str) -> str:
 +        """
@@ -111,7 +134,7 @@ index 52fbe587e..dd1660c57 100644
      @classmethod
      def _pick_fts_servers(cls, source_rse: "RseData", dest_rse: "RseData"):
          """
-@@ -932,7 +1007,8 @@ class FTS3Transfertool(Transfertool):
+@@ -932,7 +1030,8 @@ class FTS3Transfertool(Transfertool):
                  'dest_rse_id': transfer.dst.rse.id,
                  'filesize': rws.byte_count,
                  'md5': rws.md5,
@@ -121,7 +144,7 @@ index 52fbe587e..dd1660c57 100644
              },
              'filesize': rws.byte_count,
              'checksum': checksum_to_use,
-@@ -958,6 +1034,9 @@ class FTS3Transfertool(Transfertool):
+@@ -958,6 +1057,9 @@ class FTS3Transfertool(Transfertool):
          for transfer in transfers:
              files.append(self._file_from_transfer(transfer, job_params))
  

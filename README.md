@@ -92,6 +92,34 @@ first if circuit health looks wrong.
 DMM exports its own metrics on `[dmm] metrics_port` (default 9100) and, for
 backwards compatibility, at `/metrics` on the frontend port.
 
+### Tracing
+
+Off unless `OTEL_EXPORTER_OTLP_ENDPOINT` is set — a deployment with no
+collector stays silent rather than failing to connect every batch interval.
+Everything else is the standard `OTEL_*` set: `OTEL_SERVICE_NAME` (default
+`dmm`), `OTEL_RESOURCE_ATTRIBUTES`, `OTEL_EXPORTER_OTLP_HEADERS` for a
+multi-tenant collector, and `OTEL_TRACES_SAMPLER_ARG` (default `0.1`, because
+fourteen daemons open a span per cycle). `OTEL_SDK_DISABLED=true` turns it off
+outright.
+
+Spans: one per daemon cycle, one per SENSE-O call carrying the SENSE UUID, one
+around the LP solve with its `linprog` call count, and one per `/query` — whose
+parent is the `traceparent` Rucio sends, so a rule can be followed from the
+transfertool through DMM's allocation into SENSE-O. `etc/rucio.patch` injects
+that header; both halves tag the span with the rule id, and Rucio degrades to an
+unheadered request if OpenTelemetry is not installed there.
+
+The daemons and the frontend report the same `service.name` under different
+`service.instance.id`. Tracing is configured **after** the frontend is forked,
+in each process separately: a `TracerProvider` built before the fork loses its
+exporter thread in the child, and the global provider cannot be replaced once
+set. `dmm.py` does this deliberately; `core/tracing.py` explains it and detects
+the mistake if the ordering is ever changed.
+
+Trace and span ids are injected into the existing log lines, which is what makes
+a Loki line clickable through to the Tempo trace. Logs still reach Loki from
+stdout only — no second OTLP log pipeline is installed.
+
 ### Health endpoints
 
 - `GET /health` — deep check. 200 when every daemon is completing cycles, the
