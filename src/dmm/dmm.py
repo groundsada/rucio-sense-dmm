@@ -10,6 +10,7 @@ from rucio.client import Client
 from dmm.core.config import config_get_int
 from dmm.core.health import reset_heartbeats
 from dmm.core.metrics import start_metrics_server
+from dmm.core.tracing import instrument_app, instrument_database, setup_tracing
 
 from dmm.daemons.core.sites import RefreshSiteDBDaemon
 
@@ -57,6 +58,9 @@ class DMM:
     
     @staticmethod
     def run_server(port):
+        # Inside the child, not before it is spawned: see core.tracing.
+        setup_tracing("frontend")
+        instrument_app(api)
         try:
             uvicorn.run(api, host="0.0.0.0", port=port)
         except BaseException as e:
@@ -110,7 +114,14 @@ class DMM:
 
         frontend_process = multiprocessing.Process(target=self.run_server, args=(self.port,), name="Frontend")
         frontend_process.start()
-        
+
+        # After the fork, deliberately. A TracerProvider built before this point
+        # is inherited by the frontend, whose exporter thread does not survive
+        # the fork, and the global provider cannot be replaced once set — so the
+        # frontend would silently export nothing. See core.tracing.
+        setup_tracing("daemons")
+        instrument_database()
+
         logging.info("All daemons and frontend started successfully")
 
     def stop(self) -> None:
