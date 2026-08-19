@@ -6,6 +6,7 @@ import os
 from dmm.core.metrics import (
     DAEMON_CYCLE_DURATION,
     DAEMON_ERRORS,
+    DAEMON_FREQUENCY,
     DAEMON_LAST_SUCCESS,
     DAEMON_LOCK_WAIT,
     DAEMON_RUNNING,
@@ -30,6 +31,7 @@ class DaemonBase:
             logging.info(f"frequency is set to negative, not starting the daemon.")
             return
 
+        DAEMON_FREQUENCY.labels(name).set(self.frequency)
         DAEMON_RUNNING.labels(name).set(1)
         # Instantiate the heartbeat at 0 so a daemon that has never completed a
         # cycle looks infinitely stale instead of absent.
@@ -66,6 +68,7 @@ class DaemonBase:
 
     def start(self, lock):
         logging.info(f"Starting {self.__class__.__name__}")
+        DAEMON_FREQUENCY.labels(self.__class__.__name__).set(self.frequency)
         DAEMON_RUNNING.labels(self.__class__.__name__).set(0)
         try:
             self.thread = threading.Thread(

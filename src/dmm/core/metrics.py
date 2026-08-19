@@ -48,6 +48,12 @@ DAEMON_RUNNING = Gauge(
     "dmm_daemon_running", "1 while the daemon loop is alive, 0 before start and after exit",
     ["daemon"])
 
+# Exported so alerts and panels can compare a heartbeat against that daemon's own
+# interval; they range from 60s to 7200s, so a single hardcoded threshold is wrong
+# for most of them.
+DAEMON_FREQUENCY = Gauge(
+    "dmm_daemon_frequency_seconds", "Configured seconds between cycles", ["daemon"])
+
 SENSE_API_BUCKETS = (0.05, 0.25, 1, 2.5, 5, 10, 30, 60, 120, 300, float("inf"))
 
 SENSE_API_DURATION = Histogram(
