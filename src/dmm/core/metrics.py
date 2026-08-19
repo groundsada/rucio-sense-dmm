@@ -2,6 +2,7 @@ import logging
 from contextlib import contextmanager
 from datetime import timezone
 from functools import wraps
+from inspect import signature
 from time import monotonic
 
 from prometheus_client import (
@@ -15,6 +16,7 @@ from prometheus_client import (
 )
 from prometheus_client.core import CounterMetricFamily, GaugeMetricFamily
 
+from dmm.core.tracing import MANUAL_ERRORS, get_tracer, record_error
 from dmm.db.session import get_session
 from dmm.models.endpoint import Endpoint as DBEndpoint
 from dmm.models.request import Request as DBRequest
@@ -120,29 +122,68 @@ def _is_sync_timeout(exc) -> bool:
     return "504" in msg and ("gateway time-out" in msg or "gateway timeout" in msg or "time-out" in msg)
 
 
+# Parameters worth carrying onto the span. The SENSE UUID is the one that
+# matters: it is the only identifier DMM and SENSE-O share, so it is how a trace
+# here gets correlated with what SENSE-O did.
+SPAN_ATTRIBUTE_PARAMS = (
+    "sense_uuid", "rule_id", "src_site", "dst_site", "pool_site", "alloc_name",
+    "bandwidth_mbps", "profile_uuid",
+)
+
+
 @contextmanager
-def sense_api_call(op):
-    """Time one SENSE-O API call and classify how it ended. Never swallows."""
+def sense_api_call(op, attributes=None):
+    """
+    Time one SENSE-O API call, classify how it ended, and open a span for it.
+    Never swallows.
+
+    The metric and the span answer different questions — the histogram says
+    provisioning got slower this week, the span says which N sequential calls
+    one daemon cycle spent its time in — so both are recorded here rather than
+    duplicating the timing at every call site.
+    """
     start = monotonic()
     outcome = "ok"
-    try:
-        yield
-    except Exception as e:
-        if _is_sync_timeout(e):
-            outcome = "timeout"
-            SENSE_SYNC_TIMEOUTS.labels(op).inc()
-        else:
-            outcome = "error"
-        raise
-    finally:
-        SENSE_API_DURATION.labels(op, outcome).observe(monotonic() - start)
+    with get_tracer(__name__).start_as_current_span(f"sense.{op}", **MANUAL_ERRORS) as span:
+        for key, value in (attributes or {}).items():
+            span.set_attribute(f"dmm.{key}", value)
+        try:
+            yield span
+        except Exception as e:
+            if _is_sync_timeout(e):
+                outcome = "timeout"
+                SENSE_SYNC_TIMEOUTS.labels(op).inc()
+            else:
+                outcome = "error"
+            record_error(span, e)
+            raise
+        finally:
+            span.set_attribute("dmm.outcome", outcome)
+            SENSE_API_DURATION.labels(op, outcome).observe(monotonic() - start)
+
+
+def _span_attributes(bound_arguments):
+    attributes = {}
+    for name in SPAN_ATTRIBUTE_PARAMS:
+        value = bound_arguments.arguments.get(name)
+        if value is not None and isinstance(value, (str, int, float, bool)):
+            attributes[name] = value
+    return attributes
 
 
 def timed_sense_call(op):
     def decorate(function):
+        # Resolved once at decoration time; binding per call is what lets the
+        # wrapper name the SENSE UUID without eleven call sites repeating it.
+        sig = signature(function)
+
         @wraps(function)
         def wrapper(*args, **kwargs):
-            with sense_api_call(op):
+            try:
+                attributes = _span_attributes(sig.bind_partial(*args, **kwargs))
+            except TypeError:
+                attributes = None
+            with sense_api_call(op, attributes):
                 return function(*args, **kwargs)
         return wrapper
     return decorate

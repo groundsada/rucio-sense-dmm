@@ -10,6 +10,7 @@ from dmm.models.request import Request, RequestStatus
 from dmm.models.mesh import Mesh
 from dmm.db.session import databased
 from dmm.core.sense import is_circuit_active, is_being_provisioned
+from dmm.core.tracing import MANUAL_ERRORS, get_tracer, record_error
 from dmm.core.metrics import (
     DECIDER_INFEASIBLE,
     DECIDER_ROUNDING_LOSS,
@@ -189,31 +190,40 @@ class DeciderDaemon(DaemonBase):
                 return linprog(c, A_ub=A, b_ub=b, bounds=[(lower_bound, None)] * n_edges,
                                method='highs')
 
-        try:
-            # Verify a solution exists with lower_bound=0 before searching.
-            base_result = solve(0)
-            if not base_result.success:
-                DECIDER_INFEASIBLE.inc()
-                raise ValueError("No feasible solution found for the optimization problem.")
+        # The whole binary search happens inside the process-wide lock, so its
+        # span is the one to look at when every other daemon is starved.
+        with get_tracer(__name__).start_as_current_span("decider.optimize", **MANUAL_ERRORS) as span:
+            span.set_attribute("dmm.edges", n_edges)
+            span.set_attribute("dmm.constraints", len(b))
+            try:
+                # Verify a solution exists with lower_bound=0 before searching.
+                base_result = solve(0)
+                if not base_result.success:
+                    DECIDER_INFEASIBLE.inc()
+                    raise ValueError("No feasible solution found for the optimization problem.")
 
-            optim_result = base_result
+                optim_result = base_result
 
-            # The highest any single edge can be floored is the minimum capacity constraint.
-            lo = 0
-            hi = int(np.min(b))
+                # The highest any single edge can be floored is the minimum capacity constraint.
+                lo = 0
+                hi = int(np.min(b))
 
-            while hi - lo > precision_mbps:
-                mid = (lo + hi) / 2
-                result = solve(mid)
-                if result.success:
-                    lo = mid
-                    optim_result = result
-                else:
-                    hi = mid
+                while hi - lo > precision_mbps:
+                    mid = (lo + hi) / 2
+                    result = solve(mid)
+                    if result.success:
+                        lo = mid
+                        optim_result = result
+                    else:
+                        hi = mid
 
-            return optim_result.x
-        finally:
-            DECIDER_SOLVES_PER_CYCLE.observe(solves)
+                return optim_result.x
+            except Exception as e:
+                record_error(span, e)
+                raise
+            finally:
+                span.set_attribute("dmm.linprog_calls", solves)
+                DECIDER_SOLVES_PER_CYCLE.observe(solves)
 
     def _allocate_bandwidth(self, multi_graph, simple_graph, edges, edge_index, bandwidths) -> None:
         """

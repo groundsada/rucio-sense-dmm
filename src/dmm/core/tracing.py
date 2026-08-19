@@ -225,6 +225,25 @@ def instrument_app(app):
         logging.warning(f"could not instrument the frontend: {e}")
 
 
+# Spans opened with these record their exceptions through record_error instead
+# of the context manager's own handling, which would double up wherever both
+# happen and record nothing at all where DMM catches and does not re-raise.
+MANUAL_ERRORS = {"record_exception": False, "set_status_on_exception": False}
+
+
+def record_error(span, exc):
+    """Mark a span failed. Silent when opentelemetry is absent or the span is a stub."""
+    try:
+        from opentelemetry.trace import Status, StatusCode
+    except ImportError:
+        return
+    try:
+        span.record_exception(exc)
+        span.set_status(Status(StatusCode.ERROR, str(exc)))
+    except Exception:
+        pass
+
+
 class _NoopSpan:
     def set_attribute(self, key, value):
         pass

@@ -12,6 +12,7 @@ from dmm.core.metrics import (
     DAEMON_LOCK_WAIT,
     DAEMON_RUNNING,
 )
+from dmm.core.tracing import MANUAL_ERRORS, get_tracer, record_error
 
 class DaemonBase:
     def __init__(self, frequency, kwargs=None):
@@ -39,6 +40,7 @@ class DaemonBase:
             return
 
         self.started_at = time()
+        tracer = get_tracer(__name__)
         DAEMON_FREQUENCY.labels(name).set(self.frequency)
         DAEMON_RUNNING.labels(name).set(1)
         # Instantiate the heartbeat at 0 so a daemon that has never completed a
@@ -50,19 +52,27 @@ class DaemonBase:
                 try:
                     lock_wait_start = monotonic()
                     with lock:
-                        DAEMON_LOCK_WAIT.labels(name).observe(monotonic() - lock_wait_start)
+                        lock_wait = monotonic() - lock_wait_start
+                        DAEMON_LOCK_WAIT.labels(name).observe(lock_wait)
                         logging.debug(f"acquired lock")
                         cycle_start = monotonic()
-                        try:
-                            process(**kwargs)
-                            self.last_success = time()
-                            DAEMON_LAST_SUCCESS.labels(name).set(self.last_success)
-                            self._publish(name, running=True)
-                        except Exception as e:
-                            DAEMON_ERRORS.labels(name, type(e).__name__).inc()
-                            logging.error(f"Error in {name}: {e}", exc_info=True)
-                        finally:
-                            DAEMON_CYCLE_DURATION.labels(name).observe(monotonic() - cycle_start)
+                        # One span per cycle, parent of everything the cycle
+                        # does. All fourteen daemons share this lock, so the
+                        # serialisation shows up here as a shape.
+                        with tracer.start_as_current_span(f"daemon.{name}", **MANUAL_ERRORS) as span:
+                            span.set_attribute("dmm.daemon", name)
+                            span.set_attribute("dmm.lock_wait_seconds", lock_wait)
+                            try:
+                                process(**kwargs)
+                                self.last_success = time()
+                                DAEMON_LAST_SUCCESS.labels(name).set(self.last_success)
+                                self._publish(name, running=True)
+                            except Exception as e:
+                                DAEMON_ERRORS.labels(name, type(e).__name__).inc()
+                                record_error(span, e)
+                                logging.error(f"Error in {name}: {e}", exc_info=True)
+                            finally:
+                                DAEMON_CYCLE_DURATION.labels(name).observe(monotonic() - cycle_start)
                     logging.debug(f"released lock, sleeping for {self.frequency} seconds")
                 except Exception as e:
                     DAEMON_ERRORS.labels(name, type(e).__name__).inc()

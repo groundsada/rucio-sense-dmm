@@ -17,6 +17,7 @@ from dmm.core.config import config_get_int
 from dmm.core.allocation import refresh_all_sites
 from dmm.core.health import health_report
 from dmm.core.metrics import render_requests
+from dmm.core.tracing import MANUAL_ERRORS, get_tracer, record_error
 from dmm.core.timeutil import utcnow
 
 from rucio.client import Client
@@ -72,30 +73,41 @@ async def handle_client(rule_id: str, session=None):
     max_retries = config_get_int("rucio", "max_retries", default=2)
 
     retry_count = 0
-    
-    while retry_count < max_retries:
-        try:
-            req = DBRequest.get_by_id(rule_id, session=session, use_lock=False)
-            if req:
-                if req.src_endpoint and req.dst_endpoint:
-                    result = {"source": req.src_endpoint.hostname, "destination": req.dst_endpoint.hostname}
-                    return JSONResponse(content=result)
-                else:
-                    retry_count += 1
-                    if retry_count < max_retries:
-                        logging.info(f"Request {rule_id} not yet allocated, retrying in 15 seconds (attempt {retry_count}/{max_retries})")
-                        await asyncio.sleep(15)
+
+    # The span's parent is whatever traceparent Rucio sent, extracted by the
+    # FastAPI instrumentation. Its duration is a real number worth having: this
+    # handler can sleep 15 seconds a retry waiting for the allocator, and Rucio
+    # is blocked on it the whole time.
+    with get_tracer(__name__).start_as_current_span("dmm.query", **MANUAL_ERRORS) as span:
+        span.set_attribute("dmm.rule_id", rule_id)
+        while retry_count < max_retries:
+            try:
+                req = DBRequest.get_by_id(rule_id, session=session, use_lock=False)
+                if req:
+                    span.set_attribute("dmm.transfer_status", str(req.transfer_status))
+                    if req.src_endpoint and req.dst_endpoint:
+                        result = {"source": req.src_endpoint.hostname, "destination": req.dst_endpoint.hostname}
+                        span.set_attribute("dmm.retries", retry_count)
+                        return JSONResponse(content=result)
                     else:
-                        raise HTTPException(status_code=404, detail="Request not yet allocated after retries")
-            else:
-                raise HTTPException(status_code=404, detail="Request not found")
-        except HTTPException:
-            raise
-        except Exception as e:
-            logging.error(f"Error processing client request: {str(e)}", exc_info=True)
-            raise HTTPException(status_code=500, detail="Internal server error")
-    
-    raise HTTPException(status_code=404, detail="Request not yet allocated")
+                        retry_count += 1
+                        if retry_count < max_retries:
+                            logging.info(f"Request {rule_id} not yet allocated, retrying in 15 seconds (attempt {retry_count}/{max_retries})")
+                            await asyncio.sleep(15)
+                        else:
+                            span.set_attribute("dmm.retries", retry_count)
+                            raise HTTPException(status_code=404, detail="Request not yet allocated after retries")
+                else:
+                    raise HTTPException(status_code=404, detail="Request not found")
+            except HTTPException as e:
+                record_error(span, e)
+                raise
+            except Exception as e:
+                record_error(span, e)
+                logging.error(f"Error processing client request: {str(e)}", exc_info=True)
+                raise HTTPException(status_code=500, detail="Internal server error")
+
+        raise HTTPException(status_code=404, detail="Request not yet allocated")
 
 @api.get("/")
 @databased
