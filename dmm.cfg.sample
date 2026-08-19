@@ -3,7 +3,7 @@ port=80
 metrics_port=9100
 
 [db]
-db_type=postgres
+db_type=postgresql
 username=dmm
 password=dmm
 db_host=localhost

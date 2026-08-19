@@ -15,5 +15,6 @@ ENV PYTHONPATH=/opt/dmm/
 ENV DMM_CONFIG /opt/dmm/dmm.cfg
 
 EXPOSE 80
+EXPOSE 9100
 
 ENTRYPOINT ["/docker-entrypoint.sh"]

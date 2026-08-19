@@ -1,4 +1,6 @@
-FROM python:3.7-slim-bullseye
+# Installs the published sense-dmm from PyPI, not this tree — it will not carry
+# anything unreleased. Build the Dockerfile at the repo root to test a change.
+FROM python:3.10-slim-bullseye
 
 RUN apt update && apt install sqlite3
 RUN apt-get clean autoclean && \
