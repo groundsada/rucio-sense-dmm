@@ -8,6 +8,7 @@ import uvicorn
 
 from rucio.client import Client
 from dmm.core.config import config_get_int
+from dmm.core.metrics import start_metrics_server
 
 from dmm.daemons.core.sites import RefreshSiteDBDaemon
 
@@ -33,6 +34,7 @@ from dmm.api.frontend import api
 class DMM:
     def __init__(self) -> None:
         self.port = config_get_int("dmm", "port")
+        self.metrics_port = config_get_int("dmm", "metrics_port", default=9100, constraint="nonneg")
 
         # frequencies at which daemons run (in seconds)
         self.rucio_frequency = config_get_int("daemons", "rucio", default=60, constraint="nonneg")
@@ -62,7 +64,9 @@ class DMM:
 
     def start(self) -> None:
         logging.info("Starting Daemons")
-        
+
+        start_metrics_server(self.metrics_port)
+
         logging.info("Initializing site database - this must complete before other daemons start")
         sitedb = RefreshSiteDBDaemon(frequency=self.sites_frequency, kwargs={"client": self.rucio_client})
         try:

@@ -6,6 +6,10 @@ metadata:
     {{- include "dmm.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.replicaCount }}
+  {{- if .Values.postgres.persistence.enabled }}
+  strategy:
+    type: Recreate
+  {{- end }}
   selector:
     matchLabels:
       {{- include "dmm.selectorLabels" . | nindent 6 }}
@@ -20,10 +24,30 @@ spec:
         resources:
           {{- toYaml .Values.postgres.resources | nindent 10 }}
         env:
+        {{- if .Values.postgres.existingSecret }}
+        - name: POSTGRES_USER
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.postgres.existingSecret }}
+              key: POSTGRES_USER
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.postgres.existingSecret }}
+              key: POSTGRES_PASSWORD
+        {{- else }}
         - name: POSTGRES_USER
           value: {{ .Values.postgres.env.user | quote }}
         - name: POSTGRES_PASSWORD
           value: {{ .Values.postgres.env.password | quote }}
+        {{- end }}
+        {{- if .Values.postgres.persistence.enabled }}
+        - name: PGDATA
+          value: /var/lib/postgresql/data/pgdata
+        volumeMounts:
+        - name: postgres-data
+          mountPath: /var/lib/postgresql/data
+        {{- end }}
       - name: dmm
         image: "{{ .Values.dmm.image.repository }}:{{ .Values.dmm.image.tag }}"
         imagePullPolicy: {{ .Values.dmm.image.pullPolicy }}
@@ -56,6 +80,11 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       volumes:
+      {{- if .Values.postgres.persistence.enabled }}
+      - name: postgres-data
+        persistentVolumeClaim:
+          claimName: {{ .Values.postgres.persistence.existingClaim | default (printf "%s-postgres" (include "dmm.fullname" .)) }}
+      {{- end }}
       - name: dmm-config
         secret:
           secretName: {{ .Values.secrets.dmmConfig }}

@@ -15,6 +15,15 @@ postgres:
   env:
     user: "dmm"
     password: "dmm"
+  existingSecret: ""
+  persistence:
+    enabled: true
+    existingClaim: ""
+    size: 20Gi
+    storageClass: ""
+    accessModes:
+      - ReadWriteOnce
+    keepOnUninstall: true
 
 dmm:
   image:

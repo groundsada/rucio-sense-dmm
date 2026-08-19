@@ -1,5 +1,6 @@
 [dmm]
 port=80
+metrics_port=9100
 
 [db]
 db_type=postgres

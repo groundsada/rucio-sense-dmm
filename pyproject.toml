@@ -17,7 +17,8 @@ dependencies = [
     "jinja2",
     "sqlmodel",
     "uvicorn",
-    "scipy"
+    "scipy",
+    "prometheus-client"
 ]
 description = "Data Movement Manager for Rucio SENSE interoperatio prototype"
 readme = "README.md"
