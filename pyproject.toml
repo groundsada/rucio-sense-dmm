@@ -22,9 +22,10 @@ dependencies = [
 ]
 description = "Data Movement Manager for Rucio SENSE interoperatio prototype"
 readme = "README.md"
-requires-python = ">=3.7"
+requires-python = ">=3.10"
 classifiers = [
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
 ]

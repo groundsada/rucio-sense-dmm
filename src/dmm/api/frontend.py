@@ -16,6 +16,7 @@ from dmm.models.site import Site
 from dmm.core.config import config_get_int
 from dmm.core.allocation import refresh_all_sites
 from dmm.core.metrics import render_requests
+from dmm.core.timeutil import utcnow
 
 from rucio.client import Client
 
@@ -134,7 +135,7 @@ async def mark_finished(request: Request, session=None):
         req = _get_request_or_404(rule_id, session)
         _validate_sense_request(req)
         req.set_status(RequestStatus.FINISHED_R, session=session)
-        req.update({"rucio_finished_at": datetime.now()}, session=session)
+        req.update({"rucio_finished_at": utcnow()}, session=session)
         return "Request marked as finished"
     except HTTPException:
         raise

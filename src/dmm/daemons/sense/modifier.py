@@ -1,5 +1,6 @@
 import logging
 from datetime import datetime
+from dmm.core.timeutil import utcnow
 
 from dmm.daemons.base import DaemonBase
 
@@ -79,7 +80,7 @@ class SENSEModifierDaemon(DaemonBase):
             # Hold in FINISHED_R for a configurable grace period to allow circuit reuse
             finished_r_hold_secs = config_get_int("sense", "finished_r_hold_seconds", default=120, constraint="nonneg")
             if req.rucio_finished_at is not None:
-                elapsed = (datetime.now() - req.rucio_finished_at).total_seconds()
+                elapsed = (utcnow() - req.rucio_finished_at).total_seconds()
                 if elapsed < finished_r_hold_secs:
                     logging.debug(
                         f"Request {req.rule_id} entered FINISHED_R {elapsed:.0f}s ago, "

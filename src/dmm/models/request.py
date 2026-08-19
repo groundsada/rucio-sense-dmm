@@ -1,6 +1,7 @@
 from sqlmodel import Field, Relationship, select, or_
 from typing import Optional, List, ClassVar
 from datetime import timedelta
+from dmm.core.timeutil import utcnow
 from enum import Enum
 
 import logging
@@ -132,7 +133,7 @@ class Request(ModelBase, table=True):
 
     @classmethod
     def get_for_metrics(cls, session=None, terminal_window_hours: int = 6, limit: int = 5000):
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=terminal_window_hours)
+        cutoff = utcnow() - timedelta(hours=terminal_window_hours)
         statement = (
             select(cls)
             .where(or_(
@@ -199,7 +200,7 @@ class Request(ModelBase, table=True):
         logging.debug(f"REQUEST UPDATE: {self.rule_id} -> FAILED ({reason})")
         self.transfer_status = RequestStatus.FAILED
         self.failure_reason = reason
-        self.failed_at = datetime.now()
+        self.failed_at = utcnow()
         self.save(session)
 
     def mark_retry(self, reason, session=None):

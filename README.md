@@ -77,3 +77,17 @@ Access the DMM web frontend to monitor data flows and manage site configurations
 - Real-time transfer status monitoring
 - Site/RSE management (with refresh capability)
 - Network provisioning status
+
+### Prometheus requirements
+
+`[prometheus] host` must point at a Prometheus that scrapes each site's DTN node
+exporters **with a `sitename` label matching the SENSE site name**. `MonitDaemon`
+measures per-circuit throughput with
+`node_network_transmit_bytes_total{device=...,instance=...,job=...,sitename=...}`,
+so exporters scraped without `sitename` match no series at all. DMM records that
+as an unmeasurable cycle and leaves the previous reading in place, and
+`dmm_monit_scrape_failures_total{reason="no_interfaces"}` will climb — check it
+first if circuit health looks wrong.
+
+DMM exports its own metrics on `[dmm] metrics_port` (default 9100) and, for
+backwards compatibility, at `/metrics` on the frontend port.

@@ -1,5 +1,6 @@
 import logging
 from datetime import datetime
+from dmm.core.timeutil import utcnow
 
 from dmm.daemons.base import DaemonBase
 
@@ -40,16 +41,16 @@ class RucioFinisherDaemon(DaemonBase):
         except RuleNotFound as e:
             logging.error(f"Request {req.rule_id} not found in Rucio (probably because of the reaper), marking as FINISHED_R in DMM")
             req.set_status(status=RequestStatus.FINISHED_R, session=session)
-            req.update({"rucio_finished_at": datetime.now()}, session=session)
+            req.update({"rucio_finished_at": utcnow()}, session=session)
             return
             
         if is_rule_ok(status):
             logging.debug(f"Request {req.rule_id} finished with status {status}")
             req.set_status(status=RequestStatus.FINISHED_R, session=session)  # Mark request as finished
-            req.update({"rucio_finished_at": datetime.now()}, session=session)
+            req.update({"rucio_finished_at": utcnow()}, session=session)
             req.set_fts_streams(current=0, session=session)  # Remove FTS limits
         elif is_rule_stuck(status):
             logging.debug(f"Request {req.rule_id} is stuck, marking as FINISHED in DMM so circuit can be taken down")
             req.set_status(status=RequestStatus.FINISHED_R, session=session)
-            req.update({"rucio_finished_at": datetime.now()}, session=session)
+            req.update({"rucio_finished_at": utcnow()}, session=session)
             req.set_fts_streams(current=0, session=session)  # Remove FTS

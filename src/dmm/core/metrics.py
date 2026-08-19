@@ -1,5 +1,6 @@
 import logging
 from contextlib import contextmanager
+from datetime import timezone
 from functools import wraps
 from time import monotonic
 
@@ -61,6 +62,11 @@ SENSE_SYNC_TIMEOUTS = Counter(
 ADDRESS_FREE_FAILURES = Counter(
     "dmm_address_free_failures_total", "free_address calls that failed, each leaking one subnet",
     ["pool_site"])
+
+MONIT_SCRAPE_FAILURES = Counter(
+    "dmm_monit_scrape_failures_total",
+    "Throughput measurements that could not be taken, by reason — distinct from a real zero",
+    ["reason"])
 
 SITES_LAST_REFRESH = Gauge(
     "dmm_sites_last_refresh_timestamp_seconds", "Unix time of the last successful site database refresh")
@@ -164,11 +170,12 @@ REQUEST_GAUGES = (
 
 
 def _epoch(dt):
-    # created_at is written tz-aware UTC while sense_provisioned_at and
-    # rucio_finished_at are written naive by datetime.now(). Both columns drop the
-    # offset on the way into the database, so any span crossing the two is only
-    # correct while the container runs UTC, which it does.
-    return dt.timestamp() if dt is not None else None
+    if dt is None:
+        return None
+    # Every datetime column holds naive UTC — see core.timeutil.utcnow.
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
 
 
 def _elapsed(start, end):
@@ -189,6 +196,7 @@ FAILURE_REASON_CLASSES = (
     ("no_vlan_range", ("no vlan range",)),
     ("no_subnet", ("allocation failed", "subnet")),
     ("missing_site", ("missing source or destination site",)),
+    ("same_physical_site", ("both resolve to physical site",)),
     ("circuit_failed", ("circuit reached", "sense circuit")),
     ("staging_failed", ("staging failed",)),
     ("provisioning_failed", ("provisioning failed",)),

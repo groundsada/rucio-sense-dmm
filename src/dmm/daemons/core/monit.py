@@ -1,10 +1,11 @@
 import logging
-from datetime import datetime
+from time import time
 
 from dmm.daemons.base import DaemonBase
 from dmm.models.request import Request, RequestStatus
 from dmm.db.session import databased
 from dmm.core.monit import PrometheusUtils
+from dmm.core.metrics import MONIT_SCRAPE_FAILURES
 
 # Mirrored by dmm_request_throughput_ratio, so alert rules can use their own
 # threshold without redeploying DMM.
@@ -22,7 +23,7 @@ class MonitDaemon(DaemonBase):
     @databased
     def run_once(self, session=None):
         reqs = Request.get_by_status(statuses=[RequestStatus.PROVISIONED], session=session)
-        current_timestamp = round(datetime.timestamp(datetime.now()))
+        current_timestamp = round(time())
 
         for req in reqs:
             try:
@@ -35,6 +36,16 @@ class MonitDaemon(DaemonBase):
                     continue
 
                 bytes_now = self._get_all_bytes_at_t(current_timestamp, req.src_endpoint.ip_range)
+
+                # None means we could not measure, which is not the same as measuring
+                # zero. Leave the last reading and health as they were rather than
+                # reporting a healthy circuit as dead.
+                if bytes_now is None:
+                    logging.warning(
+                        f"Request {req.rule_id}: no usable throughput measurement this cycle, "
+                        "leaving previous reading in place"
+                    )
+                    continue
 
                 if req.prometheus_bytes is None:
                     req.set_prometheus_metrics(bytes_transferred=bytes_now, session=session)
@@ -50,13 +61,29 @@ class MonitDaemon(DaemonBase):
                 logging.error(f"Error monitoring request {req.rule_id}: {e}", exc_info=True)
                 continue
 
-    def _get_all_bytes_at_t(self, time, ipv6) -> float:
-        transfers = self.prometheus.get_interfaces(ipv6)
+    def _get_all_bytes_at_t(self, time, ipv6):
+        """
+        Total transmitted bytes across the interfaces behind an endpoint, or None
+        when nothing could be measured. A counter genuinely reading zero and a
+        Prometheus that answered nothing are different facts, and only the second
+        one means the measurement is unusable.
+        """
+        try:
+            transfers = self.prometheus.get_interfaces(ipv6)
+        except Exception as e:
+            MONIT_SCRAPE_FAILURES.labels("interface_lookup_failed").inc()
+            logging.error(f"Interface lookup failed for IPv6 {ipv6}: {e}", exc_info=True)
+            return None
+
         if not transfers:
+            # Usually the DTN exporters are scraped without the sitename label the
+            # byte query filters on. See the prometheus note in the README.
+            MONIT_SCRAPE_FAILURES.labels("no_interfaces").inc()
             logging.warning(f"No interfaces found for IPv6 {ipv6}")
-            return 0.0
+            return None
 
         total_bytes = 0.0
+        answered = 0
         for transfer in transfers:
             try:
                 device, instance, job, sitename = transfer[0], transfer[1], transfer[2], transfer[3]
@@ -66,11 +93,18 @@ class MonitDaemon(DaemonBase):
                 if response.get("status") == "success" and response.get("data", {}).get("result"):
                     bytes_at_t = PrometheusUtils.get_val_from_response(response)
                     total_bytes += float(bytes_at_t)
+                    answered += 1
                 else:
+                    MONIT_SCRAPE_FAILURES.labels("empty_result").inc()
                     logging.warning(f"Query {metric} returned no data")
             except Exception as e:
+                MONIT_SCRAPE_FAILURES.labels("query_failed").inc()
                 logging.error(f"Error querying bytes for interface {transfer[0]}: {e}", exc_info=True)
                 continue
+
+        if answered == 0:
+            logging.warning(f"No interface answered for IPv6 {ipv6}, cannot measure throughput")
+            return None
 
         return total_bytes
 

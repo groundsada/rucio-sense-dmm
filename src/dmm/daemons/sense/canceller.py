@@ -1,5 +1,6 @@
 import logging
 from datetime import datetime
+from dmm.core.timeutil import utcnow
 
 from dmm.daemons.base import DaemonBase
 
@@ -58,9 +59,9 @@ class SENSECancellerDaemon(DaemonBase):
                         f"Request {req.rule_id} has no rucio_finished_at timestamp; "
                         "proceeding with cancellation immediately"
                     )
-                elif (datetime.now() - req.rucio_finished_at).total_seconds() < keep_alive_secs:
+                elif (utcnow() - req.rucio_finished_at).total_seconds() < keep_alive_secs:
                     logging.debug(
-                        f"Request {req.rule_id} finished {(datetime.now() - req.rucio_finished_at).total_seconds():.0f}s ago, "
+                        f"Request {req.rule_id} finished {(utcnow() - req.rucio_finished_at).total_seconds():.0f}s ago, "
                         f"waiting for keep-alive window ({keep_alive_secs}s) before cancellation"
                     )
                     continue

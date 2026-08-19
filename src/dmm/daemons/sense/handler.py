@@ -1,5 +1,6 @@
 import logging
 from datetime import datetime
+from dmm.core.timeutil import utcnow
 from collections import defaultdict
 from math import floor
 
@@ -164,7 +165,7 @@ class SENSEHandlerDaemon(DaemonBase):
 
             if not req.sense_provisioned_at and is_create_ready(status):
                 logging.debug(f"Request {req.rule_id} is ready, updating sense_provisioned_at to current time.")
-                req.update({"sense_provisioned_at": datetime.now()}, session=session)
+                req.update({"sense_provisioned_at": utcnow()}, session=session)
 
             elif req.transfer_status in [RequestStatus.PROVISIONED] and is_create_failed(status):
                 logging.warning(

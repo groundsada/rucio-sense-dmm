@@ -1,6 +1,6 @@
 import logging
 
-from datetime import datetime
+from dmm.core.timeutil import utcnow
 
 from dmm.daemons.base import DaemonBase
 from dmm.models.request import Request, RequestStatus
@@ -121,7 +121,7 @@ class RucioInitDaemon(DaemonBase):
             return Request(
                 transfer_status=RequestStatus.FAILED,
                 failure_reason=reason,
-                failed_at=datetime.now(),
+                failed_at=utcnow(),
                 **request_kwargs,
             )
 
