@@ -44,6 +44,20 @@ helm install dmm etc/helm/
 
 The deployment includes an embedded PostgreSQL instance. For production environments, consider using an external managed database service.
 
+Metrics, traces and probes are all off or inert by default. To turn them on:
+
+```bash
+helm install dmm etc/helm/ \
+  --set serviceMonitor.enabled=true \
+  --set serviceMonitor.labels.release=<your prometheus release> \
+  --set otel.endpoint=http://<collector>:4317
+```
+
+`dmm.metricsPort` must match `[dmm] metrics_port` in the `dmm.cfg` secret; the
+chart does not template that file and cannot check it. Use
+`metricsAnnotations.enabled=true` instead of the `ServiceMonitor` if your
+collector discovers by `prometheus.io/scrape` annotation.
+
 ### Option 2: Docker
 
 #### 1. Start PostgreSQL

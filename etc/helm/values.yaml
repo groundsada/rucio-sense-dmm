@@ -38,6 +38,60 @@ dmm:
       memory: "4Gi"
       cpu: "4"
   port: 80
+  # Must match [dmm] metrics_port in the dmm.cfg secret — the chart does not
+  # template that file, so nothing here can enforce it.
+  #
+  # There is no PROMETHEUS_MULTIPROC_DIR here on purpose. DMM does not use
+  # prometheus_client's multiprocess mode: the daemons hold all the in-memory
+  # counters and serve this port from the parent, while the frontend's /metrics
+  # re-derives its series from the database. Nothing needs to be summed across
+  # processes, so a shared directory would only add a way to go wrong.
+  metricsPort: 9100
+  # Both the daemons and the frontend must see the same directory: the frontend
+  # runs in a forked child and reads these files to answer /health. They are in
+  # the same container, so this only exists to keep the writes off the
+  # container's writable layer.
+  heartbeatDir: /var/run/dmm-heartbeats
+
+probes:
+  # /health reports 503 when a daemon has missed five of its own intervals, when
+  # the database is unreachable, or when the site table is empty.
+  readiness:
+    enabled: true
+    initialDelaySeconds: 30
+    periodSeconds: 15
+    failureThreshold: 3
+  # Deliberately /health/live, which only asks whether the frontend is serving.
+  # Pointing liveness at /health would restart the pod — and drop its in-flight
+  # circuits — because one slow daemon missed a cycle.
+  liveness:
+    enabled: true
+    initialDelaySeconds: 60
+    periodSeconds: 30
+    failureThreshold: 5
+
+# Traces are off unless endpoint is set. Everything here maps to the standard
+# OTEL_* variables that src/dmm/core/tracing.py reads.
+otel:
+  endpoint: ""
+  serviceName: dmm
+  resourceAttributes: ""
+  # Fourteen daemons open a span per cycle; 1.0 is not a sensible default.
+  samplerArg: "0.1"
+  headers: ""
+
+serviceMonitor:
+  enabled: false
+  interval: 30s
+  scrapeTimeout: 10s
+  # Set to the label your Prometheus selects ServiceMonitors by, e.g.
+  # {release: prometheus}. Left empty the object is created and ignored.
+  labels: {}
+
+# For an Alloy or Prometheus that discovers by annotation rather than by
+# ServiceMonitor. Harmless when both are off.
+metricsAnnotations:
+  enabled: false
 
 secrets:
   dmmConfig: dmm-config
@@ -61,6 +115,7 @@ service:
   type: ClusterIP
   port: 8080
   targetPort: 80
+  metricsPort: 9100
 
 ingress:
   enabled: true
