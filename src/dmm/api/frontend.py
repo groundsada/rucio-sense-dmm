@@ -8,12 +8,14 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
+from prometheus_client import CONTENT_TYPE_LATEST
 
 from dmm.db.session import databased
 from dmm.models.request import Request as DBRequest, RequestStatus
 from dmm.models.site import Site
 from dmm.core.config import config_get_int
 from dmm.core.allocation import refresh_all_sites
+from dmm.core.metrics import render_requests
 
 from rucio.client import Client
 
@@ -56,101 +58,10 @@ def _validate_sense_request(req):
         raise HTTPException(status_code=400, detail="This is not a SENSE rule")
 
 
-def _prometheus_escape_label(value) -> str:
-    return str(value).replace("\\", "\\\\").replace("\n", "\\n").replace('"', '\\"')
-
-
-def _emit_gauge(lines: list[str], name: str, value, labels: dict | None = None):
-    if value is None:
-        return
-    if labels:
-        label_blob = ",".join(
-            f'{k}="{_prometheus_escape_label(v)}"' for k, v in labels.items()
-        )
-        lines.append(f"{name}{{{label_blob}}} {value}")
-    else:
-        lines.append(f"{name} {value}")
-
-
 @api.get("/metrics", response_class=PlainTextResponse)
-@databased
-async def metrics(session=None):
-    reqs = DBRequest.get_all(session=session)
+def metrics():
+    return PlainTextResponse(render_requests(), media_type=CONTENT_TYPE_LATEST)
 
-    lines: list[str] = []
-
-    lines.append("# HELP dmm_requests_total Total number of requests tracked by DMM")
-    lines.append("# TYPE dmm_requests_total gauge")
-    lines.append(f"dmm_requests_total {len(reqs)}")
-
-    status_counts: dict[str, int] = {}
-    for req in reqs:
-        status_key = str(req.transfer_status or "UNKNOWN")
-        status_counts[status_key] = status_counts.get(status_key, 0) + 1
-
-    lines.append("# HELP dmm_requests_by_status Number of requests by transfer status")
-    lines.append("# TYPE dmm_requests_by_status gauge")
-    for status_key, count in sorted(status_counts.items()):
-        _emit_gauge(lines, "dmm_requests_by_status", count, {"status": status_key})
-
-    lines.append("# HELP dmm_request_info Request state marker (always 1) with core identifying labels")
-    lines.append("# TYPE dmm_request_info gauge")
-    lines.append("# HELP dmm_request_sense_retries Number of SENSE retries for request")
-    lines.append("# TYPE dmm_request_sense_retries gauge")
-    lines.append("# HELP dmm_request_allocated_bandwidth_mbps Allocated bandwidth in Mbps")
-    lines.append("# TYPE dmm_request_allocated_bandwidth_mbps gauge")
-    lines.append("# HELP dmm_request_available_bandwidth_mbps Available bandwidth in Mbps")
-    lines.append("# TYPE dmm_request_available_bandwidth_mbps gauge")
-    lines.append("# HELP dmm_request_previous_bandwidth_mbps Previous bandwidth in Mbps")
-    lines.append("# TYPE dmm_request_previous_bandwidth_mbps gauge")
-    lines.append("# HELP dmm_request_fts_streams_current Current FTS streams")
-    lines.append("# TYPE dmm_request_fts_streams_current gauge")
-    lines.append("# HELP dmm_request_fts_streams_desired Desired FTS streams")
-    lines.append("# TYPE dmm_request_fts_streams_desired gauge")
-    lines.append("# HELP dmm_request_prometheus_throughput_gbps Measured throughput in Gbps")
-    lines.append("# TYPE dmm_request_prometheus_throughput_gbps gauge")
-    lines.append("# HELP dmm_request_prometheus_bytes Measured bytes from prometheus polling")
-    lines.append("# TYPE dmm_request_prometheus_bytes gauge")
-    lines.append("# HELP dmm_request_health Health status (1=healthy, 0=unhealthy, absent=unknown)")
-    lines.append("# TYPE dmm_request_health gauge")
-
-    for req in reqs:
-        labels = {
-            "rule_id": req.rule_id,
-            "transfer_status": str(req.transfer_status or "UNKNOWN"),
-            "sense_circuit_status": str(req.sense_circuit_status or "UNKNOWN"),
-            "src_site": req.src_site.name if req.src_site else "UNKNOWN",
-            "dst_site": req.dst_site.name if req.dst_site else "UNKNOWN",
-        }
-
-        # Rucio's own site names go on the info metric only, to keep the label
-        # sets of the numeric gauges unchanged.
-        info_labels = dict(labels)
-        info_labels["src_rse"] = req.src_logical_site or labels["src_site"]
-        info_labels["dst_rse"] = req.dst_logical_site or labels["dst_site"]
-        reason = req.failure_reason or ""
-        # Keep label value bounded — full reason lives on the dashboard/details page.
-        if len(reason) > 256:
-            reason = reason[:253] + "..."
-        info_labels["failure_reason"] = reason
-        _emit_gauge(lines, "dmm_request_info", 1, info_labels)
-        _emit_gauge(lines, "dmm_request_sense_retries", req.sense_retries if req.sense_retries is not None else 0, labels)
-        _emit_gauge(lines, "dmm_request_allocated_bandwidth_mbps", req.allocated_bandwidth_mbps, labels)
-        _emit_gauge(lines, "dmm_request_available_bandwidth_mbps", req.available_bandwidth_mbps, labels)
-        _emit_gauge(lines, "dmm_request_previous_bandwidth_mbps", req.previous_bandwidth_mbps, labels)
-        _emit_gauge(lines, "dmm_request_fts_streams_current", req.fts_streams_current, labels)
-        _emit_gauge(lines, "dmm_request_fts_streams_desired", req.fts_streams_desired, labels)
-        _emit_gauge(lines, "dmm_request_prometheus_throughput_gbps", req.prometheus_throughput, labels)
-        _emit_gauge(lines, "dmm_request_prometheus_bytes", req.prometheus_bytes, labels)
-
-        if req.health is not None:
-            if str(req.health) == "1":
-                _emit_gauge(lines, "dmm_request_health", 1, labels)
-            elif str(req.health) == "0":
-                _emit_gauge(lines, "dmm_request_health", 0, labels)
-
-    payload = "\n".join(lines) + "\n"
-    return PlainTextResponse(payload, media_type="text/plain; version=0.0.4; charset=utf-8")
 
 @api.get("/query/{rule_id}")
 @databased
