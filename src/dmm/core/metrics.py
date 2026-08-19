@@ -1,12 +1,47 @@
 import logging
 
-from prometheus_client import REGISTRY, CollectorRegistry, generate_latest, start_http_server
+from prometheus_client import (
+    REGISTRY,
+    CollectorRegistry,
+    Counter,
+    Gauge,
+    Histogram,
+    generate_latest,
+    start_http_server,
+)
 from prometheus_client.core import CounterMetricFamily, GaugeMetricFamily
 
 from dmm.db.session import get_session
 from dmm.models.request import Request as DBRequest
 
 registry = REGISTRY
+
+# Cycles are bounded by how long SENSE-O takes, not by the daemon frequency, so
+# the buckets have to reach well past the default 10s ceiling.
+DAEMON_DURATION_BUCKETS = (0.1, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300, 600, float("inf"))
+
+DAEMON_CYCLE_DURATION = Histogram(
+    "dmm_daemon_cycle_duration_seconds",
+    "Time spent running one daemon cycle, measured after the lock is held",
+    ["daemon"], buckets=DAEMON_DURATION_BUCKETS)
+
+DAEMON_LOCK_WAIT = Histogram(
+    "dmm_daemon_lock_wait_seconds",
+    "Time a daemon waited for the process-wide lock before its cycle could start",
+    ["daemon"], buckets=DAEMON_DURATION_BUCKETS)
+
+DAEMON_LAST_SUCCESS = Gauge(
+    "dmm_daemon_last_success_timestamp_seconds",
+    "Unix time of the last cycle that returned without raising",
+    ["daemon"])
+
+DAEMON_ERRORS = Counter(
+    "dmm_daemon_cycle_errors_total", "Daemon cycles that raised, by exception type",
+    ["daemon", "exc_type"])
+
+DAEMON_RUNNING = Gauge(
+    "dmm_daemon_running", "1 while the daemon loop is alive, 0 before start and after exit",
+    ["daemon"])
 
 REQUEST_LABELS = ["rule_id", "transfer_status", "sense_circuit_status", "src_site", "dst_site"]
 
