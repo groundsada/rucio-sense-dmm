@@ -3,6 +3,7 @@ import threading
 from time import monotonic, sleep, time
 import os
 
+from dmm.core.health import write_heartbeat
 from dmm.core.metrics import (
     DAEMON_CYCLE_DURATION,
     DAEMON_ERRORS,
@@ -18,6 +19,8 @@ class DaemonBase:
         self.kwargs = kwargs or {}
         self.thread = None
         self.running = True
+        self.started_at = 0
+        self.last_success = 0
 
     def process(self):
         raise NotImplementedError("Subclasses must implement this method")
@@ -25,17 +28,23 @@ class DaemonBase:
     def run_once(self, **kwargs):
         raise NotImplementedError("Subclasses must implement this method")
 
+    def _publish(self, name, running):
+        write_heartbeat(name, self.frequency, self.started_at, self.last_success, running)
+
     def run_daemon(self, process, lock, **kwargs):
         name = self.__class__.__name__
         if self.frequency < 0:
             logging.info(f"frequency is set to negative, not starting the daemon.")
+            self._publish(name, running=False)
             return
 
+        self.started_at = time()
         DAEMON_FREQUENCY.labels(name).set(self.frequency)
         DAEMON_RUNNING.labels(name).set(1)
         # Instantiate the heartbeat at 0 so a daemon that has never completed a
         # cycle looks infinitely stale instead of absent.
         DAEMON_LAST_SUCCESS.labels(name)
+        self._publish(name, running=True)
         try:
             while self.running:
                 try:
@@ -46,7 +55,9 @@ class DaemonBase:
                         cycle_start = monotonic()
                         try:
                             process(**kwargs)
-                            DAEMON_LAST_SUCCESS.labels(name).set(time())
+                            self.last_success = time()
+                            DAEMON_LAST_SUCCESS.labels(name).set(self.last_success)
+                            self._publish(name, running=True)
                         except Exception as e:
                             DAEMON_ERRORS.labels(name, type(e).__name__).inc()
                             logging.error(f"Error in {name}: {e}", exc_info=True)
@@ -65,11 +76,13 @@ class DaemonBase:
         finally:
             # Also covers the thread dying outside the loop, which nothing else notices.
             DAEMON_RUNNING.labels(name).set(0)
+            self._publish(name, running=False)
 
     def start(self, lock):
         logging.info(f"Starting {self.__class__.__name__}")
         DAEMON_FREQUENCY.labels(self.__class__.__name__).set(self.frequency)
         DAEMON_RUNNING.labels(self.__class__.__name__).set(0)
+        self._publish(self.__class__.__name__, running=False)
         try:
             self.thread = threading.Thread(
                 target=self.run_daemon,

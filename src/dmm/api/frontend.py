@@ -10,11 +10,12 @@ from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 from prometheus_client import CONTENT_TYPE_LATEST
 
-from dmm.db.session import databased
+from dmm.db.session import databased, get_session
 from dmm.models.request import Request as DBRequest, RequestStatus
 from dmm.models.site import Site
 from dmm.core.config import config_get_int
 from dmm.core.allocation import refresh_all_sites
+from dmm.core.health import health_report
 from dmm.core.metrics import render_requests
 from dmm.core.timeutil import utcnow
 
@@ -223,6 +224,30 @@ async def get_logs():
         logging.error(e)
         raise HTTPException(status_code=500, detail="Failed to read log file")
 
+@api.get("/health/live")
+async def liveness_check():
+    """
+    Is this process able to serve? Nothing more. The daemons run in the parent
+    process, so if that one dies the container goes with it and this endpoint
+    stops answering anyway — checking them here would restart the pod, and its
+    in-flight circuits, for a single slow daemon.
+    """
+    return {"status": "alive"}
+
+
 @api.get("/health")
 async def health_check():
-    return {"status": "healthy"}
+    site_count, database_error = None, None
+    # Deliberately not @databased: that decorator commits on the way out and
+    # re-raises, which would turn an unreachable database into a 500 instead of
+    # the 503 a probe can act on. An unreachable database is a health answer,
+    # not a health failure.
+    try:
+        with get_session() as session:
+            site_count = Site.count(session=session)
+    except Exception as e:
+        logging.error(f"health check could not reach the database: {e}", exc_info=True)
+        database_error = e
+
+    healthy, body = health_report(site_count=site_count, database_error=database_error)
+    return JSONResponse(content=body, status_code=200 if healthy else 503)

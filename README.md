@@ -91,3 +91,20 @@ first if circuit health looks wrong.
 
 DMM exports its own metrics on `[dmm] metrics_port` (default 9100) and, for
 backwards compatibility, at `/metrics` on the frontend port.
+
+### Health endpoints
+
+- `GET /health` — deep check. 200 when every daemon is completing cycles, the
+  database answers and the site table is populated; **503** otherwise, with
+  per-daemon detail in the body. Use this for a readiness probe.
+- `GET /health/live` — the frontend process is serving. Use this for a liveness
+  probe: `/health` going red for one slow daemon should not restart the pod and
+  take its in-flight circuits with it.
+
+The frontend runs in a separate process from the daemons, so it cannot see
+their state directly. Each daemon writes a small file to
+`$DMM_HEARTBEAT_DIR` (default `/tmp/dmm-heartbeats`) and `/health` reads them.
+Both processes must see the same directory — in Kubernetes that means an
+`emptyDir`, not two separate paths. A daemon is reported stale after five
+missed intervals, measured against its own configured frequency; a daemon whose
+frequency is negative is reported `disabled` and does not fail the check.

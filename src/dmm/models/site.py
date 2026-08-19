@@ -1,3 +1,4 @@
+from sqlalchemy import func
 from sqlmodel import Field, Relationship, select
 from typing import List, Optional
 import logging
@@ -27,6 +28,11 @@ class Site(ModelBase, table=True):
         if not isinstance(other, Site):
             return NotImplemented
         return self.name == other.name
+
+    @classmethod
+    def count(cls, session=None) -> int:
+        """Sites known to DMM. Doubles as the health endpoint's database probe."""
+        return session.exec(select(func.count(cls.name))).one()
 
     @classmethod
     def get_by_name(cls, name: str, session=None, use_lock: bool = True):

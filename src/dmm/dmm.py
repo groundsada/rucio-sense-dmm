@@ -8,6 +8,7 @@ import uvicorn
 
 from rucio.client import Client
 from dmm.core.config import config_get_int
+from dmm.core.health import reset_heartbeats
 from dmm.core.metrics import start_metrics_server
 
 from dmm.daemons.core.sites import RefreshSiteDBDaemon
@@ -65,6 +66,7 @@ class DMM:
     def start(self) -> None:
         logging.info("Starting Daemons")
 
+        reset_heartbeats()
         start_metrics_server(self.metrics_port)
 
         logging.info("Initializing site database - this must complete before other daemons start")
