@@ -120,7 +120,12 @@ class SENSEModifierDaemon(DaemonBase):
                         status=SenseCircuitStatus.MODIFY_COMMITTING.value, session=session
                     )
                 else:
-                    logging.error(f"Failed to throttle {req.rule_id}: {e}", exc_info=True)
+                    logging.error(
+                        f"Failed to throttle {req.rule_id}: {e} — "
+                        "skipping throttle, advancing to FINISHED for cancellation",
+                        exc_info=True,
+                    )
+                    req.set_status(status=RequestStatus.FINISHED, session=session)
 
         for req in reqs_stale:
             # Skip this specific request if it's already being modified

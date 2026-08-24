@@ -2,6 +2,110 @@
 
 ---
 
+## BUG-009 — `SENSEModifierDaemon`: non-transient HTTP 500 on FINISHED_R throttle call leaves request permanently stuck
+
+**Date:** 2026-08-21
+**Repo:** `rucio-sense-dmm`
+**File:** `src/dmm/daemons/sense/modifier.py`
+**Status:** Fixed
+
+### Problem
+
+When `SENSEModifierDaemon` processes a `FINISHED_R` request it calls `modify_link()` to
+throttle the circuit down to 1 Gbps before handing off to `SENSECancellerDaemon`. If
+SENSE-O returns a non-transient HTTP 500 (e.g. an MCE routing-policy constraint violation),
+the exception handler had only two branches:
+
+```python
+except Exception as e:
+    if is_sync_timeout(e):   # only matches HTTP 504 + "gateway" keyword
+        ...                  # treat as in-flight, set MODIFY_COMMITTING
+    else:
+        logging.error(f"Failed to throttle {req.rule_id}: {e}", exc_info=True)
+        # ← no status change, no retry counter, no escalation
+```
+
+Because `is_sync_timeout` checks for `"504"` + `"gateway time-out"` in the error string,
+any other HTTP error — including a permanent 500 — fell into the `else` branch, which only
+logged and returned. No DB field was changed.
+
+The request stayed in `FINISHED_R` indefinitely. Every subsequent modifier cycle
+(every 10 seconds) re-attempted the identical `modify_link()` call, received the identical
+500, and logged the identical error. `SENSECancellerDaemon` only processes `FINISHED`
+status — never `FINISHED_R` — so the circuit remained live at full allocated bandwidth,
+IPv6 endpoints were never released, and `DeciderDaemon` continued accounting for the dead
+transfer's bandwidth, starving active transfers.
+
+Observed on 2026-08-21 for circuit `83fae717-9803-464a-a422-4efd186689fd` /
+rule `bdb7f4c4192f47428b6ef86771792649` (T2_US_Caltech → T1_US_FNAL). SENSE-O returned:
+
+```
+MCE_SiteL3Routing-doSiteL3Routing-83fae717-... — Connection <...vt+routing-policy>
+requires input sites with same number of assigned gateway addresses.
+```
+
+### Fix
+
+In the `else` branch of the FINISHED_R exception handler, advance the request to `FINISHED`
+after logging the error. The 1 Gbps throttle is a courtesy step — it is not required for
+correctness. `SENSECancellerDaemon` can cancel the circuit safely from any READY state
+regardless of its current bandwidth.
+
+```python
+# modifier.py — FINISHED_R exception handler (else branch)
+else:
+    logging.error(
+        f"Failed to throttle {req.rule_id}: {e} — "
+        "skipping throttle, advancing to FINISHED for cancellation",
+        exc_info=True,
+    )
+    req.set_status(status=RequestStatus.FINISHED, session=session)  # ← added
+```
+
+The 504 path is unchanged. The error is still fully logged with traceback. Every
+non-transient failure now unblocks the cancellation pipeline instead of stalling it.
+
+**Change size:** 5 lines changed in `modifier.py`.
+
+---
+
+## BUG-008 — config_get* sentinel fix: allow default=None as a valid fallback value
+
+**Date:** 2026-08-19  
+**Repo:** `rucio-sense-dmm`  
+**File:** `src/dmm/core/config.py`  
+**Status:** Fixed
+
+### Problem
+
+`config_get`, `config_get_int`, and `config_get_bool` used `None` as both the
+"no default provided" sentinel and a valid fallback return value. The guard
+`if default is not None` evaluated to `False` when a caller passed
+`default=None`, causing the exception to always re-raise instead of returning
+`None`.
+
+This made `SENSEHandlerDaemon` crash every cycle when a `PROVISIONED` site
+pair had no entry in `[fts-streams]`. `_pair_stream_cap` called
+`config_get_int("fts-streams", "<pair>", default=None)` expecting `None` on
+a cache miss, but received `NoOptionError` instead. The daemon retried every
+10 seconds with the same result, permanently blocking FTS stream rebalancing
+until the missing config key was added manually.
+
+### Fix
+
+Introduced a module-level `_UNSET = object()` sentinel and updated all three
+helpers to use `default=_UNSET` with the guard `if default is not _UNSET`.
+This correctly distinguishes "caller wants `None` returned" from "caller
+provided no default".
+
+- Callers that **omit** `default` still raise on a missing key (unchanged)
+- Callers that pass a **non-None value** still receive that value (unchanged)
+- Callers that pass `default=None` now correctly receive `None` back (fixed)
+
+All 39 existing call sites across the codebase are backward-compatible.
+
+---
+
 ## FEATURE-001 — Multi-logical-site support: Rucio logical site names map to physical SENSE sites
 
 **Date:** 2026-08-05  
