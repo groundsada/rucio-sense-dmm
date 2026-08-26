@@ -14,9 +14,12 @@
     <nav>
         <a href="/">Home</a>
         <a href="/sites">Sites</a>
+        <a href="/logs" target="_blank" rel="noopener">Logs</a>
     </nav>
-    <div style="text-align: center; margin: 20px;">
+    <div class="toolbar sites-toolbar">
         <button type="button" onclick="refreshSites()">Refresh Sites</button>
+        <span class="legend"><span class="legend-dot legend-free"></span>Free</span>
+        <span class="legend"><span class="legend-dot legend-used"></span>Allocated</span>
     </div>
     <div class="container">
         <table>
@@ -24,16 +27,20 @@
                 <tr>
                     <th>RSE Name</th>
                     <th>SENSE URI</th>
-                    <th>Endpoints</th>
+                    <th>Endpoints (in use / total)</th>
                     <th>IP Range</th>
                 </tr>
             </thead>
             <tbody>
                 {% for site in data %}
+                {% set used = site.endpoints | selectattr('is_allocated') | list | length %}
                 <tr>
                     <td>{{ site.name }}</td>
-                    <td>{{ site.sense_uri }}</td>
+                    <td title="{{ site.sense_uri }}">{{ site.sense_uri }}</td>
                     <td>
+                        <div class="endpoint-usage {% if used == site.endpoints | length and site.endpoints | length > 0 %}endpoint-usage-full{% endif %}">
+                            {{ used }} / {{ site.endpoints | length }} in use
+                        </div>
                         <ul>
                             {% for endpoint in site.endpoints %}
                             <li class="{{ 'red' if endpoint.is_allocated else '' }}">
