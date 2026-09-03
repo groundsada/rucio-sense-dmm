@@ -18,6 +18,7 @@ from dmm.models.site import Site
 from dmm.models.mesh import Mesh
 from dmm.core.config import config_get_int
 from dmm.core.allocation import refresh_all_sites
+from dmm.core.health import health_report
 from dmm.api.serializers import mesh_to_dict, request_to_dict, site_to_dict
 
 from rucio.client import Client
@@ -452,31 +453,20 @@ async def liveness_check():
 
 @api.get("/health")
 async def health_check():
-    """Readiness: is the database actually reachable?
+    """Readiness: database reachable, sites known, daemons completing cycles.
 
     Deliberately not @databased. That decorator commits on the way out and
     re-raises, which would turn an unreachable database into a 500 rather than
     the 503 a probe can act on -- an unreachable database is a health answer,
     not a health failure.
-
-    Daemon liveness is not checked. The frontend is a separate process from the
-    daemons, so it cannot see their state without a heartbeat mechanism; that
-    lives on the otel branch and is out of scope here. This endpoint reports
-    only what it can actually observe.
     """
-    checks = []
-    healthy = True
-
+    site_count, database_error = None, None
     try:
         with get_session() as session:
-            session.exec(select(Site)).first()
-        checks.append({"name": "database", "status": "ok"})
+            site_count = len(session.exec(select(Site)).all())
     except Exception as e:
         logging.error(f"health check could not reach the database: {e}", exc_info=True)
-        checks.append({"name": "database", "status": "failed", "error": str(e)})
-        healthy = False
+        database_error = e
 
-    return JSONResponse(
-        content={"status": "healthy" if healthy else "unhealthy", "checks": checks},
-        status_code=200 if healthy else 503,
-    )
+    healthy, body = health_report(site_count=site_count, database_error=database_error)
+    return JSONResponse(content=body, status_code=200 if healthy else 503)
