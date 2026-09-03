@@ -1,11 +1,12 @@
 import logging
 import os
 import asyncio
+from hmac import compare_digest
 from datetime import datetime
 from json import JSONDecodeError
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
@@ -17,7 +18,7 @@ from dmm.db.session import databased, get_session
 from dmm.models.request import Request as DBRequest, RequestStatus
 from dmm.models.site import Site
 from dmm.models.mesh import Mesh
-from dmm.core.config import config_get_int
+from dmm.core.config import config_get, config_get_int
 from dmm.core.allocation import refresh_all_sites
 from dmm.core.health import health_report
 from dmm.api.serializers import mesh_to_dict, request_to_dict, site_to_dict
@@ -32,6 +33,33 @@ templates = Jinja2Templates(directory=templates_folder)
 
 api = FastAPI()
 api.mount("/static", StaticFiles(directory=static_folder), name="static")
+
+
+def _api_token():
+    """Shared secret for the mutating endpoints, or None when unset."""
+    return config_get("dmm", "api_token", default=None)
+
+
+def auth_enabled() -> bool:
+    return bool(_api_token())
+
+
+def _require_token(authorization: Optional[str]):
+    """Guard the POST endpoints.
+
+    Off unless [dmm] api_token is configured, so this cannot break an existing
+    deployment on upgrade. That default is not safe -- these endpoints cancel
+    circuits and reset requests, and DMM is typically on a public ingress -- so
+    startup logs a warning while it is unset.
+    """
+    expected = _api_token()
+    if not expected:
+        return
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing bearer token")
+    # Constant time: a short-circuiting == leaks the token a character at a time.
+    if not compare_digest(authorization[7:], expected):
+        raise HTTPException(status_code=403, detail="Invalid token")
 
 
 async def _parse_json_or_400(request: Request) -> dict:
@@ -279,7 +307,9 @@ async def get_sites(request: Request, session=None):
 async def open_rule_details(request: Request, rule_id: str, session=None):
     try:
         req = DBRequest.get_by_id(rule_id, session=session, use_lock=False)
-        return templates.TemplateResponse(request, "details.html", {"data": req})
+        return templates.TemplateResponse(
+            request, "details.html", {"data": req, "auth_enabled": auth_enabled()}
+        )
     except Exception as e:
         logging.error(e, exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -380,7 +410,8 @@ async def api_list_mesh(session=None):
 
 @api.post("/mark_finished")
 @databased
-async def mark_finished(request: Request, session=None):
+async def mark_finished(request: Request, authorization: Optional[str] = Header(None), session=None):
+    _require_token(authorization)
     try:
         data = await _parse_json_or_400(request)
         rule_id = _require_rule_id(data)
@@ -397,7 +428,8 @@ async def mark_finished(request: Request, session=None):
 
 @api.post("/update_fts_limit")
 @databased
-async def update_fts_limit(request: Request, session=None):
+async def update_fts_limit(request: Request, authorization: Optional[str] = Header(None), session=None):
+    _require_token(authorization)
     try:
         data = await _parse_json_or_400(request)
         rule_id = _require_rule_id(data)
@@ -420,7 +452,8 @@ async def update_fts_limit(request: Request, session=None):
 
 @api.post("/reinitialize_sense")
 @databased
-async def reinitialize_sense(request: Request, session=None):
+async def reinitialize_sense(request: Request, authorization: Optional[str] = Header(None), session=None):
+    _require_token(authorization)
     try:
         data = await _parse_json_or_400(request)
         rule_id = _require_rule_id(data)
@@ -436,7 +469,8 @@ async def reinitialize_sense(request: Request, session=None):
 
 @api.post("/reinitialize_request")
 @databased
-async def reinitialize_request(request: Request, session=None):
+async def reinitialize_request(request: Request, authorization: Optional[str] = Header(None), session=None):
+    _require_token(authorization)
     try:
         data = await _parse_json_or_400(request)
         rule_id = _require_rule_id(data)
@@ -453,7 +487,8 @@ async def reinitialize_request(request: Request, session=None):
 
 @api.post("/refresh_sites")
 @databased
-async def refresh_sites(session=None):
+async def refresh_sites(authorization: Optional[str] = Header(None), session=None):
+    _require_token(authorization)
     try:
         client = Client()
         refresh_all_sites(client, session)

@@ -9,6 +9,7 @@ import uvicorn
 from rucio.client import Client
 from dmm.core.config import config_get_int
 from dmm.core.health import reset_heartbeats
+from dmm.api.frontend import auth_enabled
 
 from dmm.daemons.core.sites import RefreshSiteDBDaemon
 
@@ -67,6 +68,13 @@ class DMM:
         # Heartbeats from a previous run would otherwise keep a renamed or
         # removed daemon permanently red.
         reset_heartbeats()
+
+        if not auth_enabled():
+            logging.warning(
+                "[dmm] api_token is not set: mark_finished, update_fts_limit, "
+                "reinitialize_sense, reinitialize_request and refresh_sites accept "
+                "unauthenticated POSTs from anyone who can reach this service"
+            )
         
         logging.info("Initializing site database - this must complete before other daemons start")
         sitedb = RefreshSiteDBDaemon(frequency=self.sites_frequency, kwargs={"client": self.rucio_client})
