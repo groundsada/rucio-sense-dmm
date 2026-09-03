@@ -3,17 +3,20 @@ import os
 import asyncio
 from datetime import datetime
 from json import JSONDecodeError
+from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 
 from dmm.db.session import databased
 from dmm.models.request import Request as DBRequest, RequestStatus
 from dmm.models.site import Site
+from dmm.models.mesh import Mesh
 from dmm.core.config import config_get_int
 from dmm.core.allocation import refresh_all_sites
+from dmm.api.serializers import mesh_to_dict, request_to_dict, site_to_dict
 
 from rucio.client import Client
 
@@ -93,7 +96,7 @@ async def metrics(session=None):
     for status_key, count in sorted(status_counts.items()):
         _emit_gauge(lines, "dmm_requests_by_status", count, {"status": status_key})
 
-    lines.append("# HELP dmm_request_info Request state marker (always 1) with core identifying labels")
+    lines.append("# HELP dmm_request_info Request state marker (always 1) with core identifying labels, including the SENSE instance uuid")
     lines.append("# TYPE dmm_request_info gauge")
     lines.append("# HELP dmm_request_sense_retries Number of SENSE retries for request")
     lines.append("# TYPE dmm_request_sense_retries gauge")
@@ -128,6 +131,10 @@ async def metrics(session=None):
         info_labels = dict(labels)
         info_labels["src_rse"] = req.src_logical_site or labels["src_site"]
         info_labels["dst_rse"] = req.dst_logical_site or labels["dst_site"]
+        # The join key for rule_id -> SENSE instance -> rtmon dashboard. Safe
+        # as a label: one bounded value per rule, on a series already keyed by
+        # rule_id, so it adds no cardinality.
+        info_labels["sense_uuid"] = req.sense_uuid or ""
         reason = req.failure_reason or ""
         # Keep label value bounded — full reason lives on the dashboard/details page.
         if len(reason) > 256:
@@ -184,7 +191,10 @@ async def handle_client(rule_id: str, session=None):
     
     raise HTTPException(status_code=404, detail="Request not yet allocated")
 
-@api.get("/")
+# response_class on the three template handlers below is not cosmetic: without
+# it FastAPI documents them as application/json, which is what the generated
+# OpenAPI spec advertised while the handlers returned HTML.
+@api.get("/", response_class=HTMLResponse)
 @databased
 async def get_dmm_status(request: Request, session=None):
     try:
@@ -194,7 +204,7 @@ async def get_dmm_status(request: Request, session=None):
         logging.error(e, exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")
 
-@api.get("/sites")
+@api.get("/sites", response_class=HTMLResponse)
 @databased
 async def get_sites(request: Request, session=None):
     try:
@@ -204,12 +214,106 @@ async def get_sites(request: Request, session=None):
         logging.error(e, exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")
 
-@api.get("/details/{rule_id}")
+@api.get("/details/{rule_id}", response_class=HTMLResponse)
 @databased
 async def open_rule_details(request: Request, rule_id: str, session=None):
     try:
         req = DBRequest.get_by_id(rule_id, session=session, use_lock=False)
         return templates.TemplateResponse(request, "details.html", {"data": req})
+    except Exception as e:
+        logging.error(e, exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+# ---------------------------------------------------------------------------
+# JSON API
+#
+# The HTML endpoints above stay exactly as they are. These expose the same
+# objects to machines: the templates already receive every field, they were
+# just never reachable except by parsing the rendered page.
+# ---------------------------------------------------------------------------
+
+@api.get("/api/requests")
+@databased
+async def api_list_requests(
+    status: Optional[str] = Query(None, description="Filter by transfer status, exact match"),
+    site: Optional[str] = Query(None, description="Filter by source or destination site"),
+    sense_uuid: Optional[str] = Query(None, description="Filter by SENSE instance uuid"),
+    limit: int = Query(500, ge=1, le=5000),
+    offset: int = Query(0, ge=0),
+    session=None,
+):
+    try:
+        reqs = DBRequest.get_all(session=session)
+
+        if status:
+            reqs = [r for r in reqs if str(r.transfer_status or "") == status]
+        if site:
+            reqs = [
+                r for r in reqs
+                if site in (
+                    r.src_site.name if r.src_site else None,
+                    r.dst_site.name if r.dst_site else None,
+                    r.src_logical_site,
+                    r.dst_logical_site,
+                )
+            ]
+        if sense_uuid:
+            reqs = [r for r in reqs if r.sense_uuid == sense_uuid]
+
+        # Stable order, so offset/limit paging cannot skip or repeat a row.
+        reqs.sort(key=lambda r: r.rule_id)
+        total = len(reqs)
+        page = reqs[offset:offset + limit]
+
+        return JSONResponse(content={
+            "total": total,
+            "count": len(page),
+            "offset": offset,
+            "limit": limit,
+            "requests": [request_to_dict(r, detail=False) for r in page],
+        })
+    except Exception as e:
+        logging.error(e, exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@api.get("/api/requests/{rule_id}")
+@databased
+async def api_get_request(rule_id: str, session=None):
+    try:
+        req = DBRequest.get_by_id(rule_id, session=session, use_lock=False)
+    except Exception as e:
+        logging.error(e, exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
+    if req is None:
+        raise HTTPException(status_code=404, detail=f"Request '{rule_id}' not found")
+    return JSONResponse(content=request_to_dict(req, detail=True))
+
+
+@api.get("/api/sites")
+@databased
+async def api_list_sites(session=None):
+    try:
+        sites = Site.get_all(session=session)
+        return JSONResponse(content={
+            "count": len(sites),
+            "sites": [site_to_dict(s, detail=True) for s in sites],
+        })
+    except Exception as e:
+        logging.error(e, exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@api.get("/api/mesh")
+@databased
+async def api_list_mesh(session=None):
+    try:
+        links = Mesh.get_all(session=session)
+        return JSONResponse(content={
+            "count": len(links),
+            "links": [mesh_to_dict(link) for link in links],
+        })
     except Exception as e:
         logging.error(e, exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")
@@ -299,14 +403,27 @@ async def refresh_sites(session=None):
         raise HTTPException(status_code=500, detail="Failed to refresh sites")
     
 @api.get("/logs", response_class=PlainTextResponse)
-async def get_logs():
+async def get_logs(
+    lines: int = Query(2000, ge=1, le=20000, description="Number of trailing lines"),
+    rule_id: Optional[str] = Query(None, description="Only lines mentioning this rule_id"),
+    level: Optional[str] = Query(None, description="Only lines at this level, e.g. ERROR"),
+):
     log_path = "dmm.log"
     if not os.path.exists(log_path):
         raise HTTPException(status_code=404, detail="Log file not found")
     try:
         with open(log_path, "r") as f:
-            lines = f.readlines()
-        return PlainTextResponse("".join(lines[-2000:]))
+            content = f.readlines()
+
+        # Filter before tailing, so `lines` counts matching lines rather than
+        # whichever ones happen to survive the filter.
+        if rule_id:
+            content = [ln for ln in content if rule_id in ln]
+        if level:
+            needle = level.upper()
+            content = [ln for ln in content if needle in ln.upper()]
+
+        return PlainTextResponse("".join(content[-lines:]))
     except Exception as e:
         logging.error(e)
         raise HTTPException(status_code=500, detail="Failed to read log file")
