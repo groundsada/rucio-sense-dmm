@@ -9,6 +9,7 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
+from starlette.concurrency import run_in_threadpool
 
 from sqlmodel import select
 
@@ -62,6 +63,30 @@ def _validate_sense_request(req):
         raise HTTPException(status_code=400, detail="This is not a SENSE rule")
 
 
+# First match wins. Bounds failure cardinality at one series per class where
+# the raw reason string would be unbounded.
+FAILURE_REASON_CLASSES = (
+    ("max_retries", ("reached max sense retries",)),
+    ("no_vlan_range", ("no vlan range",)),
+    ("no_subnet", ("allocation failed", "subnet")),
+    ("missing_site", ("missing source or destination site",)),
+    ("same_physical_site", ("both resolve to physical site",)),
+    ("circuit_failed", ("circuit reached", "sense circuit")),
+    ("staging_failed", ("staging failed",)),
+    ("provisioning_failed", ("provisioning failed",)),
+)
+
+
+def classify_failure_reason(reason) -> str:
+    if not reason:
+        return ""
+    text = str(reason).lower()
+    for name, needles in FAILURE_REASON_CLASSES:
+        if any(needle in text for needle in needles):
+            return name
+    return "other"
+
+
 def _prometheus_escape_label(value) -> str:
     return str(value).replace("\\", "\\\\").replace("\n", "\\n").replace('"', '\\"')
 
@@ -78,14 +103,15 @@ def _emit_gauge(lines: list[str], name: str, value, labels: dict | None = None):
         lines.append(f"{name} {value}")
 
 
-@api.get("/metrics", response_class=PlainTextResponse)
-@databased
-async def metrics(session=None):
-    reqs = DBRequest.get_all(session=session)
+TERMINAL_WINDOW_HOURS = 6
+MAX_EXPORTED_REQUESTS = 5000
 
+
+def _render_metrics(reqs) -> str:
     lines: list[str] = []
 
-    lines.append("# HELP dmm_requests_total Total number of requests tracked by DMM")
+    lines.append("# HELP dmm_requests_total Number of requests exported: all non-terminal, "
+                 f"plus terminal ones updated within {TERMINAL_WINDOW_HOURS}h")
     lines.append("# TYPE dmm_requests_total gauge")
     lines.append(f"dmm_requests_total {len(reqs)}")
 
@@ -99,7 +125,7 @@ async def metrics(session=None):
     for status_key, count in sorted(status_counts.items()):
         _emit_gauge(lines, "dmm_requests_by_status", count, {"status": status_key})
 
-    lines.append("# HELP dmm_request_info Request state marker (always 1) with core identifying labels, including the SENSE instance uuid")
+    lines.append("# HELP dmm_request_info Request state marker (always 1) with core identifying labels, including the SENSE instance uuid and a bounded failure class")
     lines.append("# TYPE dmm_request_info gauge")
     lines.append("# HELP dmm_request_sense_retries Number of SENSE retries for request")
     lines.append("# TYPE dmm_request_sense_retries gauge")
@@ -113,8 +139,8 @@ async def metrics(session=None):
     lines.append("# TYPE dmm_request_fts_streams_current gauge")
     lines.append("# HELP dmm_request_fts_streams_desired Desired FTS streams")
     lines.append("# TYPE dmm_request_fts_streams_desired gauge")
-    lines.append("# HELP dmm_request_prometheus_throughput_gbps Measured throughput in Gbps")
-    lines.append("# TYPE dmm_request_prometheus_throughput_gbps gauge")
+    lines.append("# HELP dmm_request_prometheus_throughput_mbps Measured throughput in Mbps")
+    lines.append("# TYPE dmm_request_prometheus_throughput_mbps gauge")
     lines.append("# HELP dmm_request_prometheus_bytes Measured bytes from prometheus polling")
     lines.append("# TYPE dmm_request_prometheus_bytes gauge")
     lines.append("# HELP dmm_request_health Health status (1=healthy, 0=unhealthy, absent=unknown)")
@@ -142,11 +168,11 @@ async def metrics(session=None):
         # as a label: one bounded value per rule, on a series already keyed by
         # rule_id, so it adds no cardinality.
         info_labels["sense_uuid"] = req.sense_uuid or ""
-        reason = req.failure_reason or ""
-        # Keep label value bounded — full reason lives on the dashboard/details page.
-        if len(reason) > 256:
-            reason = reason[:253] + "..."
-        info_labels["failure_reason"] = reason
+        # A bounded class, not the raw string. The reason is free text that
+        # embeds site names, subnets and SENSE error blobs, so as a label it is
+        # unbounded cardinality. The full string is on /details and
+        # /api/requests/{rule_id}.
+        info_labels["failure_class"] = classify_failure_reason(req.failure_reason)
         _emit_gauge(lines, "dmm_request_info", 1, info_labels)
         _emit_gauge(lines, "dmm_request_sense_retries", req.sense_retries if req.sense_retries is not None else 0, labels)
         _emit_gauge(lines, "dmm_request_allocated_bandwidth_mbps", req.allocated_bandwidth_mbps, labels)
@@ -154,7 +180,9 @@ async def metrics(session=None):
         _emit_gauge(lines, "dmm_request_previous_bandwidth_mbps", req.previous_bandwidth_mbps, labels)
         _emit_gauge(lines, "dmm_request_fts_streams_current", req.fts_streams_current, labels)
         _emit_gauge(lines, "dmm_request_fts_streams_desired", req.fts_streams_desired, labels)
-        _emit_gauge(lines, "dmm_request_prometheus_throughput_gbps", req.prometheus_throughput, labels)
+        # MonitDaemon._calculate_throughput_mbps returns Mbps; the old name
+        # said gbps and was wrong by 1000x.
+        _emit_gauge(lines, "dmm_request_prometheus_throughput_mbps", req.prometheus_throughput, labels)
         _emit_gauge(lines, "dmm_request_prometheus_bytes", req.prometheus_bytes, labels)
         # _emit_gauge skips None, so modified_priority is simply absent for a
         # rule the operator never overrode, rather than reported as 0.
@@ -167,7 +195,28 @@ async def metrics(session=None):
             elif str(req.health) == "0":
                 _emit_gauge(lines, "dmm_request_health", 0, labels)
 
-    payload = "\n".join(lines) + "\n"
+    return "\n".join(lines) + "\n"
+
+
+def _collect_metrics() -> str:
+    with get_session() as session:
+        reqs = DBRequest.get_for_metrics(
+            session=session,
+            terminal_window_hours=TERMINAL_WINDOW_HOURS,
+            limit=MAX_EXPORTED_REQUESTS,
+        )
+        return _render_metrics(reqs)
+
+
+@api.get("/metrics", response_class=PlainTextResponse)
+async def metrics():
+    """Prometheus exposition.
+
+    The query and render run in a worker thread: SQLAlchemy here is
+    synchronous, so doing it inline would block the event loop -- and every
+    other request -- for the whole scan.
+    """
+    payload = await run_in_threadpool(_collect_metrics)
     return PlainTextResponse(payload, media_type="text/plain; version=0.0.4; charset=utf-8")
 
 @api.get("/query/{rule_id}")
