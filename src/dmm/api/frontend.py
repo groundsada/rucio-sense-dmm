@@ -10,7 +10,9 @@ from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 
-from dmm.db.session import databased
+from sqlmodel import select
+
+from dmm.db.session import databased, get_session
 from dmm.models.request import Request as DBRequest, RequestStatus
 from dmm.models.site import Site
 from dmm.models.mesh import Mesh
@@ -116,6 +118,10 @@ async def metrics(session=None):
     lines.append("# TYPE dmm_request_prometheus_bytes gauge")
     lines.append("# HELP dmm_request_health Health status (1=healthy, 0=unhealthy, absent=unknown)")
     lines.append("# TYPE dmm_request_health gauge")
+    lines.append("# HELP dmm_request_priority Rucio rule priority as submitted")
+    lines.append("# TYPE dmm_request_priority gauge")
+    lines.append("# HELP dmm_request_modified_priority Rule priority after operator override, absent when never overridden")
+    lines.append("# TYPE dmm_request_modified_priority gauge")
 
     for req in reqs:
         labels = {
@@ -149,6 +155,10 @@ async def metrics(session=None):
         _emit_gauge(lines, "dmm_request_fts_streams_desired", req.fts_streams_desired, labels)
         _emit_gauge(lines, "dmm_request_prometheus_throughput_gbps", req.prometheus_throughput, labels)
         _emit_gauge(lines, "dmm_request_prometheus_bytes", req.prometheus_bytes, labels)
+        # _emit_gauge skips None, so modified_priority is simply absent for a
+        # rule the operator never overrode, rather than reported as 0.
+        _emit_gauge(lines, "dmm_request_priority", req.priority, labels)
+        _emit_gauge(lines, "dmm_request_modified_priority", req.modified_priority, labels)
 
         if req.health is not None:
             if str(req.health) == "1":
@@ -428,6 +438,45 @@ async def get_logs(
         logging.error(e)
         raise HTTPException(status_code=500, detail="Failed to read log file")
 
+@api.get("/health/live")
+async def liveness_check():
+    """Can this process serve? Nothing more.
+
+    The daemons run in the parent process, so if that dies the container goes
+    with it and this stops answering anyway. Checking anything else here would
+    restart the pod, and its in-flight circuits, for a transient dependency
+    blip.
+    """
+    return {"status": "alive"}
+
+
 @api.get("/health")
 async def health_check():
-    return {"status": "healthy"}
+    """Readiness: is the database actually reachable?
+
+    Deliberately not @databased. That decorator commits on the way out and
+    re-raises, which would turn an unreachable database into a 500 rather than
+    the 503 a probe can act on -- an unreachable database is a health answer,
+    not a health failure.
+
+    Daemon liveness is not checked. The frontend is a separate process from the
+    daemons, so it cannot see their state without a heartbeat mechanism; that
+    lives on the otel branch and is out of scope here. This endpoint reports
+    only what it can actually observe.
+    """
+    checks = []
+    healthy = True
+
+    try:
+        with get_session() as session:
+            session.exec(select(Site)).first()
+        checks.append({"name": "database", "status": "ok"})
+    except Exception as e:
+        logging.error(f"health check could not reach the database: {e}", exc_info=True)
+        checks.append({"name": "database", "status": "failed", "error": str(e)})
+        healthy = False
+
+    return JSONResponse(
+        content={"status": "healthy" if healthy else "unhealthy", "checks": checks},
+        status_code=200 if healthy else 503,
+    )
