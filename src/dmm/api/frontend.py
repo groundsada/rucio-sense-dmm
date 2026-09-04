@@ -311,7 +311,9 @@ async def get_dmm_status(request: Request, session=None):
 async def get_sites(request: Request, session=None):
     try:
         sites = Site.get_all(session=session)
-        return templates.TemplateResponse(request, "sites.html", {"data": sites})
+        return templates.TemplateResponse(
+            request, "sites.html", {"data": sites, "auth_enabled": auth_enabled()}
+        )
     except Exception as e:
         logging.error(e, exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")
