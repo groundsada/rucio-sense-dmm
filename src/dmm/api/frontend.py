@@ -169,6 +169,10 @@ def _render_metrics(reqs) -> str:
     lines.append("# TYPE dmm_request_fts_streams_desired gauge")
     lines.append("# HELP dmm_request_prometheus_throughput_mbps Measured throughput in Mbps")
     lines.append("# TYPE dmm_request_prometheus_throughput_mbps gauge")
+    lines.append("# HELP dmm_request_prometheus_throughput_gbps DEPRECATED alias of "
+                 "dmm_request_prometheus_throughput_mbps, in Gbps. Kept so existing "
+                 "dashboards keep resolving; scheduled for removal")
+    lines.append("# TYPE dmm_request_prometheus_throughput_gbps gauge")
     lines.append("# HELP dmm_request_prometheus_bytes Measured bytes from prometheus polling")
     lines.append("# TYPE dmm_request_prometheus_bytes gauge")
     lines.append("# HELP dmm_request_health Health status (1=healthy, 0=unhealthy, absent=unknown)")
@@ -211,6 +215,16 @@ def _render_metrics(reqs) -> str:
         # MonitDaemon._calculate_throughput_mbps returns Mbps; the old name
         # said gbps and was wrong by 1000x.
         _emit_gauge(lines, "dmm_request_prometheus_throughput_mbps", req.prometheus_throughput, labels)
+        # Deprecated alias. It carries the converted value rather than the
+        # original one, because the original was the 1000x bug: a panel titled
+        # Gbps was reading a Mbps number. Emitting it wrong a second time to
+        # preserve wrong dashboards is not worth it, and nothing alerts on it.
+        _emit_gauge(
+            lines,
+            "dmm_request_prometheus_throughput_gbps",
+            None if req.prometheus_throughput is None else req.prometheus_throughput / 1000,
+            labels,
+        )
         _emit_gauge(lines, "dmm_request_prometheus_bytes", req.prometheus_bytes, labels)
         # _emit_gauge skips None, so modified_priority is simply absent for a
         # rule the operator never overrode, rather than reported as 0.

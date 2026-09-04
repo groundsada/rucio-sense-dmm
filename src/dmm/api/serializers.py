@@ -77,7 +77,7 @@ def request_to_dict(req, detail: bool = True) -> dict:
             "streams_desired": req.fts_streams_desired,
         },
         "measured": {
-            "throughput": req.prometheus_throughput,
+            "throughput_mbps": req.prometheus_throughput,
             "bytes": req.prometheus_bytes,
         },
         "timestamps": {
