@@ -1,0 +1,56 @@
+name: build image
+
+# Manual by design. Lives on the default branch so workflow_dispatch is
+# available, and takes the ref to build, so feature branches get an image
+# without carrying CI config into their pull requests.
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: branch, tag or sha to build
+        required: true
+        default: msada-dev
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Derive a tag safe for a docker reference
+        id: meta
+        run: echo "tag=$(echo '${{ inputs.ref }}' | tr '/' '-')" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          # The cluster is x86_64. A native arm64 build would not run there.
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}:${{ steps.meta.outputs.tag }}
+            ghcr.io/${{ github.repository }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - run: |
+          echo "### Image" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "ghcr.io/${{ github.repository }}:${{ steps.meta.outputs.tag }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "ghcr.io/${{ github.repository }}:${{ github.sha }}" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
